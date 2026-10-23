@@ -119,6 +119,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Dados extraídos, manifestos e logs do pipeline
+data/
+
 # Environments
 .env
 .venv

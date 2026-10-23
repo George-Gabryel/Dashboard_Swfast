@@ -17,6 +17,20 @@ class PeriodoInvalido(ValueError):
     """Período fora das regras aceitas pela API."""
 
 
+def data_de_texto(texto: str) -> date:
+    """Converte YYYY-MM-DD em date, com erro amigável.
+
+    Só a conversão fica no try: um erro de regra do Periodo (ex.: mais de
+    7 dias) precisa chegar com a própria mensagem, não como "formato inválido".
+    """
+    try:
+        return datetime.strptime(texto, "%Y-%m-%d").date()
+    except ValueError as erro:
+        raise PeriodoInvalido(
+            f"A data {texto!r} precisa estar no formato YYYY-MM-DD (ex.: 2026-10-15)."
+        ) from erro
+
+
 @dataclass(frozen=True)
 class Periodo:
     """Um intervalo fechado de datas [inicio, fim]."""
@@ -52,15 +66,7 @@ class Periodo:
     @classmethod
     def de_texto(cls, inicio: str, fim: str) -> "Periodo":
         """Constrói a partir de duas datas no formato YYYY-MM-DD."""
-        try:
-            return cls(
-                inicio=datetime.strptime(inicio, "%Y-%m-%d").date(),
-                fim=datetime.strptime(fim, "%Y-%m-%d").date(),
-            )
-        except ValueError as erro:
-            raise PeriodoInvalido(
-                "As datas precisam estar no formato YYYY-MM-DD (ex.: 2026-10-15)."
-            ) from erro
+        return cls(inicio=data_de_texto(inicio), fim=data_de_texto(fim))
 
     # ------------------------------------------------------------------
     # Propriedades e formatação
@@ -104,9 +110,9 @@ class Periodo:
         Serve para a carga histórica: pedir 90 dias de uma vez é recusado,
         então o intervalo vira 13 janelas de 7 dias.
         """
-        if dias_por_janela > LIMITE_DIAS_API:
+        if not 1 <= dias_por_janela <= LIMITE_DIAS_API:
             raise PeriodoInvalido(
-                f"A janela não pode passar de {LIMITE_DIAS_API} dias."
+                f"A janela precisa ter entre 1 e {LIMITE_DIAS_API} dias."
             )
         if fim < inicio:
             raise PeriodoInvalido("A data final é anterior à inicial.")

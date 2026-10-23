@@ -4,7 +4,3 @@ polars>=1.0
 
 # Etapa de carga (Load) — já listados para o ambiente ficar pronto
 psycopg[binary]>=3.2
-
-# Testes
-pytest>=8.0
-testcontainers[postgres]>=4.0

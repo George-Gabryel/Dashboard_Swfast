@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # Erros que valem uma nova tentativa: instabilidade de rede ou do servidor.
 STATUS_TEMPORARIOS = {429, 500, 502, 503, 504}
 
+# Teto para o Retry-After: um servidor pedindo 1h de espera não pode
+# segurar o ciclo inteiro.
+ESPERA_MAXIMA_SEGUNDOS = 60.0
+
 
 class ErroDeApi(RuntimeError):
     """Falha ao conversar com a API."""
@@ -69,6 +73,7 @@ class ClienteApi:
         ultimo_erro: Exception | None = None
 
         for tentativa in range(1, self.tentativas + 1):
+            pausa = espera
             try:
                 resposta = self.sessao.get(url, params=parametros, timeout=self.timeout)
             except requests.RequestException as erro:
@@ -100,8 +105,14 @@ class ClienteApi:
                         "[%s] %s em %s (tentativa %d/%d)",
                         self.nome, status, caminho, tentativa, self.tentativas,
                     )
+                    if status == 429:
+                        # Se a API disser quanto esperar, espera-se isso (com teto).
+                        pausa = _espera_pedida(resposta, padrao=espera)
+                elif status >= 400:
+                    # Qualquer outro 4xx/5xx: definitivo, e sempre como ErroDeApi —
+                    # quem chama não precisa conhecer as exceções do requests.
+                    raise ErroDeApi(f"[{self.nome}] {status} em {caminho}.")
                 else:
-                    resposta.raise_for_status()
                     if not resposta.content:
                         return []
                     try:
@@ -113,7 +124,7 @@ class ClienteApi:
 
             if tentativa < self.tentativas:
                 # Espera progressiva: 2s, 4s, 8s... dá tempo de a API se recuperar.
-                time.sleep(espera)
+                time.sleep(pausa)
                 espera *= 2
 
         raise ErroDeApi(
@@ -128,3 +139,12 @@ class ClienteApi:
 
     def __exit__(self, *_: object) -> None:
         self.fechar()
+
+
+def _espera_pedida(resposta: requests.Response, padrao: float) -> float:
+    """Lê o Retry-After (em segundos) de um 429. Sem header válido, usa o padrão."""
+    try:
+        pedida = float(resposta.headers.get("Retry-After", ""))
+    except ValueError:
+        return padrao
+    return min(max(pedida, padrao), ESPERA_MAXIMA_SEGUNDOS)

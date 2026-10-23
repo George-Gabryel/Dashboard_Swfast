@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+import requests
+
 from .cliente import ClienteApi, ErroDeApi
 from .periodo import Periodo
 
@@ -108,7 +110,16 @@ class Extrator:
         if carga is None:
             return []
         if isinstance(carga, list):
-            return [item for item in carga if isinstance(item, dict)]
+            registros = [item for item in carga if isinstance(item, dict)]
+            descartados = len(carga) - len(registros)
+            if descartados:
+                # Sinal de que o formato da API mudou: melhor saber pelo log
+                # do que por uma contagem que caiu sem explicação.
+                logger.warning(
+                    "[%s] %d itens da lista não são objetos e foram descartados.",
+                    self.nome, descartados,
+                )
+            return registros
         if isinstance(carga, dict):
             return [carga]
         logger.warning("[%s] retorno em formato inesperado: %s", self.nome, type(carga))
@@ -127,7 +138,9 @@ class Extrator:
         logger.info("[%s] extraindo %s", self.nome, periodo)
         try:
             carga = self.cliente.get(self.caminho, parametros)
-        except ErroDeApi as erro:
+        except (ErroDeApi, requests.RequestException) as erro:
+            # O cliente já traduz tudo para ErroDeApi; o RequestException é
+            # rede de segurança para a regra "uma fonte não derruba o ciclo".
             logger.error("[%s] %s", self.nome, erro)
             return ResultadoExtracao(
                 fonte=self.nome,

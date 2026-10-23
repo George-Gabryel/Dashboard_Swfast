@@ -1,0 +1,6 @@
+# Dependências de desenvolvimento: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Testes
+pytest>=8.0
+testcontainers[postgres]>=4.0
