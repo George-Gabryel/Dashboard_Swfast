@@ -48,6 +48,17 @@ def _booleano(nome: str, padrao: bool) -> bool:
     return bruto in {"1", "true", "sim", "yes", "y"}
 
 
+def diretorio_dados_do_ambiente(caminho_env: str | Path | None = None) -> Path:
+    """Pasta-raiz dos dados (DIRETORIO_DADOS no .env, padrão `data`).
+
+    Separada da Configuracao porque a transformação precisa dela e não
+    precisa da API-Key: transformar arquivos já baixados não pode falhar
+    por falta de uma chave que não vai ser usada.
+    """
+    load_dotenv(caminho_env, override=False)
+    return Path(_opcional("DIRETORIO_DADOS", "data")).expanduser()
+
+
 @dataclass(frozen=True)
 class Configuracao:
     """Todos os parâmetros de execução do pipeline.
@@ -75,9 +86,7 @@ class Configuracao:
     @classmethod
     def a_partir_do_ambiente(cls, caminho_env: str | Path | None = None) -> "Configuracao":
         """Lê o .env e devolve a configuração já validada."""
-        load_dotenv(caminho_env, override=False)
-
-        diretorio_dados = Path(_opcional("DIRETORIO_DADOS", "data")).expanduser()
+        diretorio_dados = diretorio_dados_do_ambiente(caminho_env)
 
         configuracao = cls(
             url_base=_opcional("SWFAST_URL", "https://analytics-api.swfast.com.br/v5"),
