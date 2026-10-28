@@ -117,6 +117,8 @@ class PipelineFalso:
     """Substitui o pipeline real: devolve manifestos prontos, sem rede."""
 
     erro: str | None = None
+    #: Quando definido, cada fonte grava estes registros como JSON bruto de verdade.
+    registros: list[dict] | None = None
 
     def __init__(self, configuracao) -> None:
         self.configuracao = configuracao
@@ -128,9 +130,13 @@ class PipelineFalso:
 
     def executar(self, periodo=None) -> ManifestoExecucao:
         manifesto = ManifestoExecucao(self.configuracao.diretorio_manifesto)
+        gravador = GravadorBruto(self.configuracao.diretorio_raw)
         for extrator in self.fontes_ativas:
-            resultado = ResultadoExtracao(extrator.nome, "/x", PERIODO, erro=self.erro)
-            manifesto.registrar(resultado, arquivo=None)
+            resultado = ResultadoExtracao(
+                extrator.nome, "/x", PERIODO, registros=self.registros or [], erro=self.erro
+            )
+            arquivo = gravador.gravar(resultado) if self.registros else None
+            manifesto.registrar(resultado, arquivo=arquivo)
         return manifesto
 
     def executar_historico(self, inicio, fim) -> list[ManifestoExecucao]:
@@ -145,8 +151,8 @@ def rodar(monkeypatch, tmp_path):
     monkeypatch.setenv("SWFAST_API_KEY", "chave-de-teste")
     monkeypatch.setenv("DIRETORIO_DADOS", str(tmp_path))
 
-    def _rodar(*argumentos: str, erro: str | None = None) -> int:
-        pipeline = type("Pipeline", (PipelineFalso,), {"erro": erro})
+    def _rodar(*argumentos: str, erro: str | None = None, registros: list[dict] | None = None) -> int:
+        pipeline = type("Pipeline", (PipelineFalso,), {"erro": erro, "registros": registros})
         monkeypatch.setattr(ponto_de_entrada, "PipelineExtracao", pipeline)
         monkeypatch.setattr(sys, "argv", ["main.py", *argumentos])
         return ponto_de_entrada.main()
@@ -183,4 +189,63 @@ def test_historico_nao_combina_com_inicio_e_fim(rodar):
 def test_inicio_sem_fim_e_erro_de_uso(rodar):
     with pytest.raises(SystemExit) as saida:
         rodar("--inicio", "2026-10-01")
+    assert saida.value.code == 2
+
+
+# --- main: extração + transformação no mesmo comando -----------------------------
+
+def venda_completa() -> dict:
+    """Uma venda com todos os campos da planilha, para a transformação sair sem alertas."""
+    from swfast.esquemas import DADOS_VENDA, Tipo
+
+    exemplo = {
+        Tipo.TEXTO: "x",
+        Tipo.INTEIRO: 1,
+        Tipo.DECIMAL: 1.5,
+        Tipo.DATA: "2026-10-17T00:00:00",
+        Tipo.DATA_HORA: "2026-10-17T15:31:50",
+    }
+    registro = {coluna.origem: exemplo[coluna.tipo] for coluna in DADOS_VENDA.colunas if coluna.origem}
+    registro.update(id="V1", produtos=[], pagamentos=[], descontos=[], acrescimos=[], fiscais=[])
+    return registro
+
+
+def gravar_bruto(tmp_path, conteudo: str) -> None:
+    pasta = tmp_path / "raw" / "vendas" / "dt=2026-10-23"
+    pasta.mkdir(parents=True)
+    (pasta / "vendas_20261017_20261023.json").write_text(conteudo, encoding="utf-8")
+
+
+def test_extracao_ja_transforma_o_que_gravou(rodar, tmp_path):
+    assert rodar("--fontes", "vendas", registros=[venda_completa()]) == 0
+    assert list((tmp_path / "staging" / "dados_venda").glob("dt=*/*.parquet"))
+
+
+def test_so_transformar_nao_precisa_da_api_key(rodar, tmp_path, monkeypatch):
+    gravar_bruto(tmp_path, json.dumps([venda_completa()]))
+    monkeypatch.delenv("SWFAST_API_KEY")
+    monkeypatch.setattr("swfast.config.load_dotenv", lambda *_, **__: None)
+
+    assert rodar("--so-transformar", "--todos") == 0
+    tabela = pl.read_parquet(next((tmp_path / "staging" / "dados_venda").glob("dt=*/*.parquet")))
+    assert tabela["id"].to_list() == ["V1"]
+
+
+def test_so_transformar_sem_json_e_erro_de_uso(rodar):
+    assert rodar("--so-transformar") == 2
+
+
+def test_so_transformar_com_json_invalido_sai_com_falha(rodar, tmp_path):
+    gravar_bruto(tmp_path, "{isto não é json")
+    assert rodar("--so-transformar") == 1
+
+
+@pytest.mark.parametrize("argumentos", [
+    ("--todos",),
+    ("--so-transformar", "--todos", "--arquivo", "x.json"),
+    ("--so-transformar", "--fontes", "vendas"),
+])
+def test_combinacoes_invalidas_de_transformacao(rodar, argumentos):
+    with pytest.raises(SystemExit) as saida:
+        rodar(*argumentos)
     assert saida.value.code == 2
