@@ -103,7 +103,8 @@ def consultar(banco, comando: str) -> list[tuple]:
 def test_criar_tabelas_e_idempotente(banco):
     banco.criar_tabelas()
     tabelas = {linha[0] for linha in consultar(
-        banco, "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        banco, "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
     )}
     assert tabelas == {
         "dados_venda", "dados_produtos", "dados_pagamento", "dados_desconto",
@@ -180,3 +181,57 @@ def test_cancelamentos(banco):
     carregadas = carregar(banco, cancelamento, fonte="cancelamentos")
     assert carregadas == {"dados_venda_cancelamento": 1, "dados_produto_cancelamento": 1}
     assert consultar(banco, "SELECT id_venda FROM dados_produto_cancelamento") == [("C1",)]
+
+
+# -- views do painel -----------------------------------------------------------------
+
+def test_views_do_painel_existem(banco):
+    from swfast.visoes import VISOES
+
+    views = {linha[0] for linha in consultar(banco, "SELECT table_name FROM information_schema.views WHERE table_schema = 'public'")}
+    assert views == set(VISOES)
+
+
+def test_painel_vendas_calcula_hora_dia_da_semana_e_faturamento(banco):
+    carregar(
+        banco,
+        venda("V1", valorFaturamento=100.0, qtdPessoas=2, dataHoraTransacao="2026-10-23T20:15:00", data="2026-10-23T00:00:00"),
+        venda("V2", valorFaturamento=50.0, qtdPessoas=1, dataHoraTransacao="2026-10-24T12:05:00", data="2026-10-24T00:00:00"),
+    )
+    linhas = consultar(
+        banco, "SELECT id, hora, dia_semana, dia_semana_numero, valor_faturamento FROM painel_vendas ORDER BY id"
+    )
+    assert linhas == [("V1", 20, "Sexta", 5, 100.0), ("V2", 12, "Sábado", 6, 50.0)]
+    assert consultar(banco, "SELECT avg(valor_faturamento), sum(qtd_pessoas) FROM painel_vendas") == [(75.0, 3)]
+
+
+def test_painel_produtos_e_pagamentos_trazem_a_data_da_venda(banco):
+    carregar(banco, venda("V1", pagamentos=[
+        {"id": "G1", "formaPagamento": "MASTER CREDITO", "valorPagamento": 60.0},
+        {"id": "G2", "formaPagamento": "PIX", "valorPagamento": 40.0},
+        {"id": "G3", "formaPagamento": "VR VOUCHER", "valorPagamento": 10.0},
+    ]))
+    assert consultar(banco, "SELECT data FROM painel_produtos") == [(date(2026, 10, 17),)]
+    assert consultar(banco, "SELECT forma_pagamento, tipo_pagamento FROM painel_pagamentos ORDER BY id") == [
+        ("MASTER CREDITO", "Crédito"), ("PIX", "PIX"), ("VR VOUCHER", "Voucher"),
+    ]
+
+
+def test_painel_cancelamentos_usa_a_data_do_cancelamento(banco):
+    carregar(banco, {
+        "id": "C1",
+        "operador": "KARINE",
+        "tipoCancelamento": "Total",
+        "dataHoraCancelamento": "2026-10-17T15:31:25",
+        "motivoCancelamento": "DESISTÊNCIA",
+        "produtos": [{"id": "PC1", "produto": "AGUA", "qtdProdutos": 2, "valorProduto": 19.8}],
+    }, fonte="cancelamentos")
+    assert consultar(
+        banco, "SELECT data, motivo_cancelamento, tipo_cancelamento, operador_caixa, valor_produto FROM painel_cancelamentos"
+    ) == [(date(2026, 10, 17), "DESISTÊNCIA", "Total", "KARINE", 19.8)]
+
+
+def test_views_sobrevivem_a_criar_tabelas_de_novo(banco):
+    carregar(banco, venda("V1"))
+    banco.criar_tabelas()
+    assert consultar(banco, "SELECT count(*) FROM painel_vendas") == [(1,)]

@@ -1,0 +1,60 @@
+# Metabase do dashboard Swfast — compose próprio: parar o ETL não derruba
+# o dashboard, que continua lendo o banco.
+#
+# Entra na rede do banco (projeto "dashboard-swfast") e acessa o Postgres
+# pelo nome "postgres". As configurações do próprio Metabase (perguntas,
+# dashboards, usuários) ficam no banco "metabase" desse mesmo Postgres.
+#
+# Variáveis: .env.meta na raiz do repositório (modelo: .env.meta.example).
+# Ele é só do Metabase — este container não recebe a chave da API Swfast.
+#
+# Instalação (uma vez, nesta ordem, a partir da raiz do repositório):
+#   1. docker compose up -d --build                         # ETL: cria tabelas e views
+#   2. docker compose -f metabase/docker-compose.yml up -d  # Metabase
+#   3. docker compose run --rm instalar-dashboard
+#        cria o banco "metabase" e os usuários, configura o Metabase, monta o
+#        dashboard e grava o link público em data/dashboard_url.txt.
+#        Enquanto o banco "metabase" não existe o container reinicia sozinho;
+#        o passo 3 espera ele ficar de pé.
+#   4. No Windows, logado como o cliente:
+#        powershell -ExecutionPolicy Bypass -File metabase\abrir_dashboard.ps1 -Instalar
+#      cria o atalho "Dashboard Swfast" na área de trabalho.
+#
+# Rodar o passo 3 de novo atualiza o dashboard sem duplicar nada.
+# Editar à mão: http://127.0.0.1:3000 com METABASE_ADMIN_EMAIL / METABASE_ADMIN_SENHA (.env.meta).
+
+name: swfast-dashboard
+
+services:
+  metabase:
+    image: metabase/metabase:v0.64.4
+    container_name: swfast-metabase
+    restart: unless-stopped
+    env_file: ../.env.meta
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: "5432"
+      MB_DB_DBNAME: metabase
+      # MB_DB_USER e MB_DB_PASS vêm do .env.meta.
+      MB_SITE_LOCALE: pt_BR
+      MB_ANON_TRACKING_ENABLED: "false"
+      MB_CHECK_FOR_UPDATES: "false"
+      JAVA_TIMEZONE: America/Recife
+      TZ: America/Recife
+    ports:
+      # Só nesta máquina: o link público não fica exposto na rede.
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    networks:
+      - banco
+
+networks:
+  banco:
+    external: true
+    name: dashboard-swfast_default

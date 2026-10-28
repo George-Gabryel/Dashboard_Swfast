@@ -1,0 +1,77 @@
+# ETL Swfast em container — roda um ciclo ao subir e depois a cada
+# INTERVALO_HORAS (.env, padrão 3h: 00h, 03h, 06h... 21h).
+#
+# O banco NÃO está aqui: ele vem do compose próprio dele (projeto
+# "dashboard-swfast", serviço "postgres"). Este container entra na rede
+# daquele projeto e acessa o banco pelo nome "postgres". Suba o banco antes:
+#     cd <pasta do compose do banco> && docker compose up -d
+#     cd <esta pasta>                && docker compose up -d --build
+#
+# Acompanhar:   docker logs -f swfast-etl
+# Manifestos:   ./data/_manifesto/*.json      Logs: ./data/_logs/*.log
+# Atualizar:    docker compose up -d --build
+#
+# --- Produção: Windows + WSL2 + Docker Engine (Ubuntu) ----------------------
+# Os dois containers usam restart: unless-stopped, então voltam sozinhos
+# sempre que o Docker sobe. Para o Docker subir no boot, sem login:
+#   1. No Ubuntu do WSL, em /etc/wsl.conf:
+#          [boot]
+#          systemd=true
+#      depois:  sudo systemctl enable docker
+#   2. No Windows, Agendador de Tarefas -> Criar Tarefa:
+#        Gatilho: "Ao iniciar o sistema"
+#        Marcar:  "Executar estando o usuário conectado ou não"
+#        Ação:    wsl.exe  -d Ubuntu --exec sleep infinity
+#      (liga o WSL no boot e o mantém de pé; sem isso ele só sobe no login)
+#   3. Deixe este projeto, o compose do banco, o .env e data/ dentro do
+#      Linux (ex.: ~/swfast), não em /mnt/c — mais rápido e sem problema de
+#      permissão nas pastas montadas.
+
+name: swfast-etl
+
+services:
+  etl:
+    build: .
+    image: swfast-etl
+    container_name: swfast-etl
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # O .env serve para rodar no Windows (127.0.0.1); aqui dentro da
+      # rede o banco é o serviço "postgres" na porta interna 5432.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      DIRETORIO_DADOS: /app/data
+      TZ: America/Recife
+    volumes:
+      - ./data:/app/data
+    networks:
+      - banco
+
+  # Instala/atualiza o dashboard no Metabase e sai. Não sobe com o
+  # `docker compose up` (profile); roda só quando chamado:
+  #     docker compose run --rm instalar-dashboard
+  # É o único que lê o .env.meta: o ETL não recebe as senhas do Metabase.
+  instalar-dashboard:
+    image: swfast-etl
+    profiles: ["dashboard"]
+    env_file:
+      - .env
+      - .env.meta
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      DIRETORIO_DADOS: /app/data
+      TZ: America/Recife
+    volumes:
+      - ./data:/app/data
+    networks:
+      - banco
+    command: ["python", "-m", "swfast.metabase", "instalar"]
+
+networks:
+  banco:
+    # Rede criada pelo compose do banco (projeto "dashboard-swfast").
+    # O Metabase, quando entrar, usa esta mesma rede.
+    external: true
+    name: dashboard-swfast_default

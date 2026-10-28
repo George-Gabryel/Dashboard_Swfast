@@ -76,6 +76,8 @@ class Configuracao:
     timeout_segundos: int = 120
     tentativas: int = 3
     espera_inicial_retentativa: float = 2.0
+    #: Modo --continuo: um ciclo a cada N horas, em horários fixos a partir de 00:00.
+    intervalo_horas: int = 3
 
     lista_de_lojas: str | None = None
     usar_loja_id_externo: bool = True
@@ -102,6 +104,7 @@ class Configuracao:
             timeout_segundos=_inteiro("TIMEOUT_SEGUNDOS", 120),
             tentativas=_inteiro("TENTATIVAS", 3),
             espera_inicial_retentativa=float(_inteiro("ESPERA_INICIAL_RETENTATIVA", 2)),
+            intervalo_horas=_inteiro("INTERVALO_HORAS", 3),
             lista_de_lojas=_opcional("LISTA_DE_LOJAS") or None,
             usar_loja_id_externo=_booleano("USAR_LOJA_ID_EXTERNO", True),
         )
@@ -117,6 +120,12 @@ class Configuracao:
             raise ConfiguracaoInvalida("TENTATIVAS precisa ser no mínimo 1.")
         if self.intervalo_entre_chamadas < 0:
             raise ConfiguracaoInvalida("INTERVALO_ENTRE_CHAMADAS não pode ser negativo.")
+        if self.intervalo_horas < 1 or 24 % self.intervalo_horas:
+            # Os horários são fixos a partir de 00:00; com 5h o último ciclo do
+            # dia (20h) e o primeiro do seguinte (00h) ficariam a 4h um do outro.
+            raise ConfiguracaoInvalida(
+                "INTERVALO_HORAS precisa dividir 24 exatamente: 1, 2, 3, 4, 6, 8, 12 ou 24."
+            )
 
     @property
     def conninfo(self) -> str:
@@ -137,3 +146,41 @@ class Configuracao:
     def preparar_diretorios(self) -> None:
         self.diretorio_manifesto.mkdir(parents=True, exist_ok=True)
         self.diretorio_logs.mkdir(parents=True, exist_ok=True)
+
+
+@dataclass(frozen=True)
+class ConfiguracaoMetabase:
+    """O que `python -m swfast.metabase instalar` precisa além da Configuracao.
+
+    Vem do .env.meta, separado do .env: o ETL não usa nada disto e o
+    container do Metabase não precisa da chave da API Swfast.
+    """
+
+    url: str
+    url_publica: str
+    admin_email: str
+    admin_senha: str
+    app_usuario: str
+    app_senha: str
+    leitor_usuario: str
+    leitor_senha: str
+    #: Como o Metabase enxerga o Postgres (pela rede dos containers).
+    banco_host: str = "postgres"
+    banco_porta: int = 5432
+
+    @classmethod
+    def a_partir_do_ambiente(cls, caminho_env: str | Path | None = None) -> "ConfiguracaoMetabase":
+        load_dotenv(caminho_env, override=False)
+        return cls(
+            url=_opcional("METABASE_URL", "http://metabase:3000").rstrip("/"),
+            # O endereço que o navegador do cliente usa — não o da rede interna.
+            url_publica=_opcional("METABASE_URL_PUBLICA", "http://127.0.0.1:3000").rstrip("/"),
+            admin_email=_obrigatorio("METABASE_ADMIN_EMAIL"),
+            admin_senha=_obrigatorio("METABASE_ADMIN_SENHA"),
+            app_usuario=_opcional("MB_DB_USER", "metabase_app"),
+            app_senha=_obrigatorio("MB_DB_PASS"),
+            leitor_usuario=_opcional("METABASE_LEITOR_USUARIO", "metabase_leitor"),
+            leitor_senha=_obrigatorio("METABASE_LEITOR_SENHA"),
+            banco_host=_opcional("METABASE_BANCO_HOST", "postgres"),
+            banco_porta=_inteiro("METABASE_BANCO_PORTA", 5432),
+        )

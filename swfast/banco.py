@@ -25,6 +25,7 @@ import psycopg
 from psycopg import sql
 
 from .esquemas import ESQUEMAS_POR_FONTE, EsquemaTabela, Tipo
+from .visoes import VISOES
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,26 @@ class Banco:
 
     # -- estrutura ----------------------------------------------------------
     def criar_tabelas(self, esquemas: Sequence[EsquemaTabela] | None = None) -> None:
-        """Cria o que ainda não existe. Rodar de novo não altera nada."""
-        if esquemas is None:
+        """Cria as tabelas que ainda não existem e recria as views do painel.
+
+        Rodar de novo não mexe nas tabelas. As views (`visoes.py`) são
+        apagadas e recriadas na mesma transação: uma mudança de coluna
+        nelas chega ao banco sem passo manual, e quem lê nunca vê o meio.
+        """
+        todas = esquemas is None
+        if todas:
             esquemas = [esquema for lista in ESQUEMAS_POR_FONTE.values() for esquema in lista]
         with self.conexao.transaction(), self.conexao.cursor() as cursor:
             for esquema in esquemas:
                 for comando in ddl(esquema):
                     cursor.execute(comando)
+            # As views leem todas as tabelas: só fazem sentido com todas criadas.
+            if todas:
+                for nome, consulta in VISOES.items():
+                    cursor.execute(sql.SQL("DROP VIEW IF EXISTS {}").format(sql.Identifier(nome)))
+                    cursor.execute(
+                        sql.SQL("CREATE VIEW {} AS {}").format(sql.Identifier(nome), sql.SQL(consulta))
+                    )
 
     # -- carga --------------------------------------------------------------
     def carregar(self, fonte: str, tabelas: dict[str, pl.DataFrame]) -> dict[str, int]:

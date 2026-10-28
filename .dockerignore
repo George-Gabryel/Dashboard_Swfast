@@ -1,0 +1,14 @@
+.git
+.gitignore
+.gitattributes
+.venv
+.env
+.env.meta
+.pytest_cache
+__pycache__
+**/__pycache__
+data
+tests
+requirements-dev.txt
+Dockerfile
+docker-compose.yml

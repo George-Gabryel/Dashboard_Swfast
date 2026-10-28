@@ -5,9 +5,12 @@ Rodar: pytest -q
 
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -185,13 +188,17 @@ class BancoFalso:
         pass
 
 
-def rodar_pipeline(tmp_path, banco: BancoFalso) -> ManifestoExecucao:
-    configuracao = Configuracao(
+def configuracao_de_teste(tmp_path) -> Configuracao:
+    return Configuracao(
         url_base="https://api.exemplo", api_key="chave",
         postgres_banco="b", postgres_usuario="u", postgres_senha="s",
         diretorio_manifesto=tmp_path / "_manifesto", diretorio_logs=tmp_path / "_logs",
         intervalo_entre_chamadas=0,
     )
+
+
+def rodar_pipeline(tmp_path, banco: BancoFalso) -> ManifestoExecucao:
+    configuracao = configuracao_de_teste(tmp_path)
     extratores = [ExtratorComDados("vendas", [venda_completa()]), ExtratorComDados("cancelamentos", [])]
     return PipelineExtracao(configuracao, extratores, banco).executar(PERIODO)
 
@@ -322,3 +329,113 @@ def test_inicio_sem_fim_e_erro_de_uso(rodar):
     with pytest.raises(SystemExit) as saida:
         rodar("--inicio", "2026-10-01")
     assert saida.value.code == 2
+
+
+def test_intervalo_que_nao_divide_24_e_erro_de_configuracao(rodar, monkeypatch):
+    monkeypatch.setenv("INTERVALO_HORAS", "5")
+    assert rodar() == 2
+
+
+def test_continuo_nao_combina_com_periodo(rodar):
+    with pytest.raises(SystemExit) as saida:
+        rodar("--continuo", "--inicio", "2026-10-01", "--fim", "2026-10-02")
+    assert saida.value.code == 2
+
+
+# --- modo contínuo ----------------------------------------------------------------
+
+@pytest.mark.parametrize("agora, horas, esperado", [
+    (datetime(2026, 10, 28, 10, 15), 3, datetime(2026, 10, 28, 12, 0)),
+    (datetime(2026, 10, 28, 12, 0), 3, datetime(2026, 10, 28, 15, 0)),
+    (datetime(2026, 10, 28, 23, 30), 3, datetime(2026, 10, 29, 0, 0)),
+    (datetime(2026, 10, 28, 0, 0, 1), 3, datetime(2026, 10, 28, 3, 0)),
+    (datetime(2026, 10, 28, 10, 15), 6, datetime(2026, 10, 28, 12, 0)),
+    (datetime(2026, 10, 31, 20, 0), 24, datetime(2026, 11, 1, 0, 0)),
+])
+def test_proxima_execucao_em_horarios_fixos(agora, horas, esperado):
+    assert ponto_de_entrada.proxima_execucao(agora, horas) == esperado
+
+
+def test_aguardar_banco_tenta_ate_conectar(monkeypatch):
+    tentativas = iter([ErroDeBanco("subindo"), ErroDeBanco("subindo"), None])
+
+    def conectar(self):
+        erro = next(tentativas)
+        if erro:
+            raise erro
+        return self
+
+    monkeypatch.setattr(ponto_de_entrada.Banco, "conectar", conectar)
+    monkeypatch.setattr(ponto_de_entrada.Banco, "fechar", lambda self: None)
+    esperas: list[float] = []
+
+    configuracao = configuracao_de_teste(Path("."))
+    assert ponto_de_entrada.aguardar_banco(configuracao, logging.getLogger("t"), espera=10, esperar=esperas.append)
+    assert esperas == [10, 10]
+
+
+def test_aguardar_banco_desiste_depois_das_tentativas(monkeypatch):
+    def nunca(self):
+        raise ErroDeBanco("fora do ar")
+
+    monkeypatch.setattr(ponto_de_entrada.Banco, "conectar", nunca)
+    configuracao = configuracao_de_teste(Path("."))
+    assert not ponto_de_entrada.aguardar_banco(
+        configuracao, logging.getLogger("t"), tentativas=3, esperar=lambda _: None
+    )
+
+
+def test_aguardar_ate_acorda_em_pedacos_e_respeita_o_relogio():
+    relogio = [datetime(2026, 10, 28, 11, 58)]
+    esperas: list[float] = []
+
+    def esperar(segundos):
+        esperas.append(segundos)
+        relogio[0] += timedelta(seconds=segundos)
+
+    ponto_de_entrada.aguardar_ate(datetime(2026, 10, 28, 12, 0, 30), agora=lambda: relogio[0], esperar=esperar)
+    assert esperas == [60, 60, 30]
+
+
+def test_modo_continuo_roda_ciclos_ate_ser_interrompido(tmp_path):
+    ciclos: list[int] = []
+    esperas: list[datetime] = []
+
+    def ciclo(*_):
+        ciclos.append(1)
+        return 1  # ciclo com falha não para o agendamento
+
+    def esperar_ate(momento):
+        esperas.append(momento)
+        if len(esperas) == 3:
+            raise KeyboardInterrupt
+
+    codigo = ponto_de_entrada.executar_continuamente(
+        configuracao_de_teste(tmp_path), argparse.Namespace(), logging.getLogger("t"),
+        ciclo=ciclo, esperar_banco=lambda *_: True, esperar_ate=esperar_ate,
+        agora=lambda: datetime(2026, 10, 28, 10, 15),
+    )
+    assert codigo == 130
+    assert len(ciclos) == 3
+    assert esperas[0] == datetime(2026, 10, 28, 12, 0)
+
+
+def test_modo_continuo_pula_o_ciclo_quando_o_banco_nao_responde(tmp_path):
+    ciclos: list[int] = []
+
+    def esperar_ate(_):
+        raise KeyboardInterrupt
+
+    ponto_de_entrada.executar_continuamente(
+        configuracao_de_teste(tmp_path), argparse.Namespace(), logging.getLogger("t"),
+        ciclo=lambda *_: ciclos.append(1) or 0, esperar_banco=lambda *_: False, esperar_ate=esperar_ate,
+    )
+    assert ciclos == []
+
+
+def test_modo_continuo_para_em_erro_de_uso(tmp_path):
+    codigo = ponto_de_entrada.executar_continuamente(
+        configuracao_de_teste(tmp_path), argparse.Namespace(), logging.getLogger("t"),
+        ciclo=lambda *_: 2, esperar_banco=lambda *_: True, esperar_ate=lambda _: None,
+    )
+    assert codigo == 2
