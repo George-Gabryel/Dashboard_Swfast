@@ -73,7 +73,8 @@ def test_catalogo_tem_as_duas_fontes_da_v5(monkeypatch):
     from swfast.catalogo import construir_catalogo
     from swfast.config import Configuracao
 
-    monkeypatch.setenv("SWFAST_API_KEY", "chave-de-teste")
+    for nome in ("SWFAST_API_KEY", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"):
+        monkeypatch.setenv(nome, "valor-de-teste")
     configuracao = Configuracao.a_partir_do_ambiente()
     fontes = construir_catalogo(configuracao)
 

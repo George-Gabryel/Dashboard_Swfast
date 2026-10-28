@@ -5,7 +5,6 @@ Rodar: pytest -q
 
 from __future__ import annotations
 
-import json
 from datetime import date, datetime
 
 import polars as pl
@@ -22,7 +21,6 @@ from swfast.esquemas import (
     Tipo,
 )
 from swfast.transformacao import (
-    EtapaTransformacao,
     ErroDeTransformacao,
     Transformador,
     converter,
@@ -234,45 +232,7 @@ def test_fonte_desconhecida():
         Transformador.para_fonte("estoques")
 
 
-# -- gravação ------------------------------------------------------------------
-
-def gravar_bruto(tmp_path, fonte, registros):
-    caminho = tmp_path / "raw" / fonte / "dt=2026-10-23" / f"{fonte}_20261017_20261023.json"
-    caminho.parent.mkdir(parents=True)
-    caminho.write_text(json.dumps(registros), encoding="utf-8")
-    return caminho
-
-
-def test_etapa_grava_uma_tabela_por_aba_e_nao_grava_tabela_vazia(tmp_path):
-    bruto = gravar_bruto(tmp_path, "vendas", [venda(produtos=[{"id": "P1"}])])
-    resultado = EtapaTransformacao(tmp_path / "staging").executar(bruto)
-
-    destino = tmp_path / "staging" / "dados_produtos" / "dt=2026-10-23" / "vendas_20261017_20261023.parquet"
-    assert resultado.arquivos["dados_produtos"] == destino
-    assert pl.read_parquet(destino)["id"].to_list() == ["P1"]
-    assert resultado.arquivos["dados_desconto"] is None
-    assert not (tmp_path / "staging" / "dados_desconto").exists()
-    assert not list((tmp_path / "staging").rglob("*.tmp"))
-
-
-def test_reprocessar_o_mesmo_arquivo_sobrescreve_e_remove_tabela_que_ficou_vazia(tmp_path):
-    bruto = gravar_bruto(tmp_path, "vendas", [venda(descontos=[{"id": "D1"}])])
-    etapa = EtapaTransformacao(tmp_path / "staging")
-    primeira = etapa.executar(bruto)
-    assert primeira.arquivos["dados_desconto"].exists()
-
-    bruto.write_text(json.dumps([venda(descontos=[])]), encoding="utf-8")
-    segunda = etapa.executar(bruto)
-    assert segunda.arquivos["dados_desconto"] is None
-    assert not primeira.arquivos["dados_desconto"].exists()
-
-
-def test_json_invalido(tmp_path):
-    bruto = gravar_bruto(tmp_path, "vendas", [])
-    bruto.write_text("{ quebrado", encoding="utf-8")
-    with pytest.raises(ErroDeTransformacao):
-        EtapaTransformacao(tmp_path / "staging").executar(bruto)
-
+# -- esquemas ------------------------------------------------------------------
 
 def test_cada_tabela_tem_chave_primaria_que_existe_nas_colunas():
     for esquemas in ESQUEMAS_POR_FONTE.values():

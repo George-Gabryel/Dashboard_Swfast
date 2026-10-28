@@ -48,20 +48,6 @@ class ResultadoExtracao:
     def quantidade(self) -> int:
         return len(self.registros)
 
-    def resumo(self) -> dict[str, Any]:
-        """Linha do manifesto de execução — sem os dados, só os números."""
-        return {
-            "fonte": self.fonte,
-            "caminho": self.caminho,
-            "periodo_inicio": self.periodo.inicio_iso,
-            "periodo_fim": self.periodo.fim_iso,
-            "registros": self.quantidade,
-            "duracao_segundos": round(self.duracao_segundos, 2),
-            "executado_em": self.executado_em.isoformat(timespec="seconds"),
-            "sucesso": self.sucesso,
-            "erro": self.erro,
-        }
-
 
 class Extrator:
     """Coleta uma fonte da API v5 em um período.

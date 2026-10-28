@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+from psycopg.conninfo import make_conninfo
 
 
 class ConfiguracaoInvalida(RuntimeError):
@@ -48,17 +49,6 @@ def _booleano(nome: str, padrao: bool) -> bool:
     return bruto in {"1", "true", "sim", "yes", "y"}
 
 
-def diretorio_dados_do_ambiente(caminho_env: str | Path | None = None) -> Path:
-    """Pasta-raiz dos dados (DIRETORIO_DADOS no .env, padrão `data`).
-
-    Separada da Configuracao porque a transformação precisa dela e não
-    precisa da API-Key: transformar arquivos já baixados não pode falhar
-    por falta de uma chave que não vai ser usada.
-    """
-    load_dotenv(caminho_env, override=False)
-    return Path(_opcional("DIRETORIO_DADOS", "data")).expanduser()
-
-
 @dataclass(frozen=True)
 class Configuracao:
     """Todos os parâmetros de execução do pipeline.
@@ -71,8 +61,15 @@ class Configuracao:
     url_base: str
     api_key: str
 
-    diretorio_raw: Path
+    postgres_banco: str
+    postgres_usuario: str
+    postgres_senha: str
+
     diretorio_manifesto: Path
+    diretorio_logs: Path
+
+    postgres_host: str = "localhost"
+    postgres_porta: int = 5432
 
     dias_por_janela: int = 7
     intervalo_entre_chamadas: float = 5.0
@@ -86,13 +83,20 @@ class Configuracao:
     @classmethod
     def a_partir_do_ambiente(cls, caminho_env: str | Path | None = None) -> "Configuracao":
         """Lê o .env e devolve a configuração já validada."""
-        diretorio_dados = diretorio_dados_do_ambiente(caminho_env)
+        load_dotenv(caminho_env, override=False)
+
+        diretorio_dados = Path(_opcional("DIRETORIO_DADOS", "data")).expanduser()
 
         configuracao = cls(
             url_base=_opcional("SWFAST_URL", "https://analytics-api.swfast.com.br/v5"),
             api_key=_obrigatorio("SWFAST_API_KEY"),
-            diretorio_raw=diretorio_dados / "raw",
+            postgres_banco=_obrigatorio("POSTGRES_DB"),
+            postgres_usuario=_obrigatorio("POSTGRES_USER"),
+            postgres_senha=_obrigatorio("POSTGRES_PASSWORD"),
+            postgres_host=_opcional("POSTGRES_HOST", "localhost"),
+            postgres_porta=_inteiro("POSTGRES_PORT", 5432),
             diretorio_manifesto=diretorio_dados / "_manifesto",
+            diretorio_logs=diretorio_dados / "_logs",
             dias_por_janela=_inteiro("DIAS_POR_JANELA", 7),
             intervalo_entre_chamadas=float(_inteiro("INTERVALO_ENTRE_CHAMADAS", 5)),
             timeout_segundos=_inteiro("TIMEOUT_SEGUNDOS", 120),
@@ -114,6 +118,22 @@ class Configuracao:
         if self.intervalo_entre_chamadas < 0:
             raise ConfiguracaoInvalida("INTERVALO_ENTRE_CHAMADAS não pode ser negativo.")
 
+    @property
+    def conninfo(self) -> str:
+        """String de conexão do psycopg. A senha não aparece em `endereco_banco`."""
+        return make_conninfo(
+            host=self.postgres_host,
+            port=self.postgres_porta,
+            dbname=self.postgres_banco,
+            user=self.postgres_usuario,
+            password=self.postgres_senha,
+        )
+
+    @property
+    def endereco_banco(self) -> str:
+        """Para mensagens de log: host:porta/banco, sem credenciais."""
+        return f"{self.postgres_host}:{self.postgres_porta}/{self.postgres_banco}"
+
     def preparar_diretorios(self) -> None:
-        self.diretorio_raw.mkdir(parents=True, exist_ok=True)
         self.diretorio_manifesto.mkdir(parents=True, exist_ok=True)
+        self.diretorio_logs.mkdir(parents=True, exist_ok=True)

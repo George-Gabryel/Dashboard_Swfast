@@ -1,8 +1,8 @@
 """Etapa 2 — Transformação: do JSON bruto às tabelas tipadas.
 
-Lê um arquivo de `data/raw/`, aplica as regras das planilhas e grava uma
-tabela Parquet por aba em `data/staging/`. Nada aqui chama a API nem toca
-no banco: a entrada é o arquivo bruto, a saída é o insumo da carga.
+Recebe os registros que a extração trouxe da API, aplica as regras das
+planilhas e devolve uma tabela Polars por aba. Tudo em memória: nada aqui
+chama a API nem toca no banco; a saída é o insumo da carga (`banco.py`).
 
 Regras de dados faltantes:
 
@@ -18,7 +18,6 @@ import json
 import logging
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -47,7 +46,7 @@ ID_DO_PAI = "__id_venda__"
 
 
 class ErroDeTransformacao(RuntimeError):
-    """O arquivo bruto não pode ser transformado (não existe, JSON inválido, fonte desconhecida)."""
+    """Não há esquema para a fonte pedida."""
 
 
 # ---------------------------------------------------------------------------
@@ -260,106 +259,6 @@ def _primeiro_formato(textos: pl.Series, formatos: Sequence[str], destino: pl.Da
     return pl.select(pl.coalesce(tentativas)).to_series()
 
 
-# ---------------------------------------------------------------------------
-# Leitura e gravação
-# ---------------------------------------------------------------------------
-@dataclass
-class ArquivoBruto:
-    """Um JSON de `data/raw/<fonte>/dt=<dia>/<nome>.json`."""
-
-    caminho: Path
-
-    @property
-    def fonte(self) -> str:
-        return self.caminho.parent.parent.name
-
-    @property
-    def particao(self) -> str:
-        return self.caminho.parent.name
-
-    def ler(self) -> list[dict[str, Any]]:
-        try:
-            with self.caminho.open(encoding="utf-8") as arquivo:
-                carga = json.load(arquivo)
-        except FileNotFoundError as erro:
-            raise ErroDeTransformacao(f"Arquivo não encontrado: {self.caminho}") from erro
-        except json.JSONDecodeError as erro:
-            raise ErroDeTransformacao(f"JSON inválido em {self.caminho}: {erro}") from erro
-        if isinstance(carga, dict):
-            carga = [carga]
-        if not isinstance(carga, list):
-            raise ErroDeTransformacao(f"{self.caminho} não contém uma lista de registros.")
-        return carga
-
-
-class GravadorStaging:
-    """Grava cada tabela em Parquet, espelhando a partição do arquivo bruto.
-
-    data/raw/vendas/dt=2026-10-23/vendas_20261017_20261023.json
-      -> data/staging/dados_venda/dt=2026-10-23/vendas_20261017_20261023.parquet
-      -> data/staging/dados_produtos/dt=2026-10-23/vendas_20261017_20261023.parquet
-      -> ...
-
-    O nome é derivado do arquivo bruto, então transformar o mesmo arquivo de
-    novo sobrescreve o resultado anterior em vez de duplicar.
-    """
-
-    def __init__(self, diretorio_staging: Path) -> None:
-        self.diretorio_staging = Path(diretorio_staging)
-
-    def caminho_para(self, tabela: str, origem: ArquivoBruto) -> Path:
-        return self.diretorio_staging / tabela / origem.particao / f"{origem.caminho.stem}.parquet"
-
-    def gravar(self, tabela: str, dados: pl.DataFrame, origem: ArquivoBruto) -> Path | None:
-        destino = self.caminho_para(tabela, origem)
-
-        if dados.is_empty():
-            # Tabela sem linhas não gera arquivo. Se uma execução anterior do
-            # mesmo arquivo bruto gerou um, ele sai, para não ficar dado velho.
-            destino.unlink(missing_ok=True)
-            return None
-
-        destino.parent.mkdir(parents=True, exist_ok=True)
-        temporario = destino.with_name(destino.name + ".tmp")
-        dados.write_parquet(temporario)
-        temporario.replace(destino)
-        return destino
-
-
-@dataclass
-class ResultadoTransformacao:
-    origem: ArquivoBruto
-    relatorios: list[RelatorioTabela]
-    arquivos: dict[str, Path | None]
-
-    def resumo(self) -> str:
-        partes = [f"{r.tabela}={r.linhas}" for r in self.relatorios]
-        return f"{self.origem.caminho.name}: " + ", ".join(partes)
-
-
-class EtapaTransformacao:
-    """Junta leitura, transformação e gravação para um arquivo bruto."""
-
-    def __init__(self, diretorio_staging: Path) -> None:
-        self.gravador = GravadorStaging(diretorio_staging)
-
-    def executar(self, caminho: Path) -> ResultadoTransformacao:
-        origem = ArquivoBruto(Path(caminho))
-        transformador = Transformador.para_fonte(origem.fonte)
-        registros = origem.ler()
-
-        tabelas, relatorios = transformador.transformar(registros)
-        arquivos = {
-            nome: self.gravador.gravar(nome, dados, origem) for nome, dados in tabelas.items()
-        }
-
-        for relatorio in relatorios:
-            registrar_no_log(relatorio)
-        resultado = ResultadoTransformacao(origem, relatorios, arquivos)
-        logger.info("Transformado — %s", resultado.resumo())
-        return resultado
-
-
 def registrar_no_log(relatorio: RelatorioTabela) -> None:
     nome = relatorio.tabela
     logger.info("[%s] %d linhas", nome, relatorio.linhas)
@@ -379,18 +278,3 @@ def registrar_no_log(relatorio: RelatorioTabela) -> None:
             nome, ", ".join(relatorio.campos_desconhecidos),
         )
 
-
-def arquivos_mais_recentes(diretorio_raw: Path) -> list[Path]:
-    """O JSON mais novo de cada fonte — o padrão quando nada é informado."""
-    escolhidos = []
-    for pasta_fonte in sorted(Path(diretorio_raw).iterdir() if Path(diretorio_raw).exists() else []):
-        if not pasta_fonte.is_dir():
-            continue
-        candidatos = list(pasta_fonte.glob("dt=*/*.json"))
-        if candidatos:
-            escolhidos.append(max(candidatos, key=lambda caminho: caminho.stat().st_mtime))
-    return escolhidos
-
-
-def todos_os_arquivos(diretorio_raw: Path) -> list[Path]:
-    return sorted(Path(diretorio_raw).glob("*/dt=*/*.json"))

@@ -1,116 +1,119 @@
-"""Gravação da camada bruta (raw) e do manifesto de execução.
+"""O manifesto de execução: o log secundário do pipeline.
 
-Dois arquivos saem de cada ciclo:
-
-1. O JSON bruto de cada fonte, fiel ao que a API devolveu. É o insumo do
-   Transform e a garantia de que dá para reprocessar sem chamar a API.
-2. O manifesto — uma linha por fonte, com contagem, duração e erro. É o
-   registro de que o ciclo rodou e o que aconteceu nele.
+Cada ciclo grava um JSON legível em `data/_manifesto/`, com o que aconteceu
+em cada etapa de cada fonte — quantos registros a extração trouxe, quantas
+linhas cada tabela teve na transformação, quantas foram gravadas no banco,
+quanto tempo levou e, se falhou, em qual etapa e por quê. Abre no Bloco de
+Notas ou no navegador, sem ferramenta nenhuma.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
-
-import polars as pl
+from typing import Any
 
 from .extratores import ResultadoExtracao
+from .periodo import Periodo
+from .transformacao import RelatorioTabela
 
 logger = logging.getLogger(__name__)
 
-# Uma coluna por chave de ResultadoExtracao.resumo(), mais o caminho do arquivo.
-ESQUEMA_MANIFESTO = {
-    "fonte": pl.String,
-    "caminho": pl.String,
-    "periodo_inicio": pl.String,
-    "periodo_fim": pl.String,
-    "registros": pl.Int64,
-    "duracao_segundos": pl.Float64,
-    "executado_em": pl.String,
-    "sucesso": pl.Boolean,
-    "erro": pl.String,
-    "arquivo": pl.String,
-}
-
-
-class GravadorBruto:
-    """Escreve o resultado da extração em disco, particionado por fonte e dia."""
-
-    def __init__(self, diretorio_raw: Path) -> None:
-        self.diretorio_raw = Path(diretorio_raw)
-
-    def caminho_para(self, resultado: ResultadoExtracao) -> Path:
-        """Monta o caminho do arquivo — determinístico, e é isso que dá idempotência.
-
-        data/raw/vendas/dt=2026-10-21/vendas_20261015_20261021.json
-
-        Rodar o mesmo período duas vezes grava o mesmo nome e sobrescreve.
-        Nunca gera duplicata.
-        """
-        particao = f"dt={datetime.now():%Y-%m-%d}"
-        pasta = self.diretorio_raw / resultado.fonte / particao
-        return pasta / f"{resultado.fonte}_{resultado.periodo.rotulo}.json"
-
-    def gravar(self, resultado: ResultadoExtracao) -> Path | None:
-        """Grava o JSON bruto. Devolve None se não houve o que gravar."""
-        if not resultado.sucesso:
-            logger.warning("[%s] nada gravado: a extração falhou.", resultado.fonte)
-            return None
-        if resultado.quantidade == 0:
-            logger.info("[%s] período sem registros, nenhum arquivo gerado.", resultado.fonte)
-            return None
-
-        destino = self.caminho_para(resultado)
-        destino.parent.mkdir(parents=True, exist_ok=True)
-
-        # Grava num .tmp e só no fim troca pelo definitivo: se o processo cair
-        # no meio, a versão anterior continua intacta em vez de virar um JSON
-        # pela metade. O replace é atômico no mesmo disco.
-        temporario = destino.with_name(destino.name + ".tmp")
-
-        # ensure_ascii=False preserva acentos nas descrições de produto;
-        # o JSON fica legível na hora de conferir um caso específico.
-        with temporario.open("w", encoding="utf-8") as arquivo:
-            json.dump(resultado.registros, arquivo, ensure_ascii=False, indent=2, default=str)
-        temporario.replace(destino)
-
-        logger.info("[%s] %d registros em %s", resultado.fonte, resultado.quantidade, destino)
-        return destino
+FORMATO_DATA_HORA = "%Y-%m-%d %H:%M:%S"
 
 
 class ManifestoExecucao:
-    """Acumula os resumos do ciclo e grava um Parquet com o histórico.
+    """Acumula o resultado de cada fonte no ciclo e grava um JSON no fim."""
 
-    É aqui que o Polars entra na etapa de extração: não para transformar
-    dados de venda, mas para manter o log das execuções em formato
-    consultável — dá para abrir no Metabase e ver se algum ciclo falhou.
-    """
-
-    def __init__(self, diretorio_manifesto: Path) -> None:
+    def __init__(self, diretorio_manifesto: Path, periodo: Periodo | None = None) -> None:
         self.diretorio_manifesto = Path(diretorio_manifesto)
-        self.linhas: list[dict] = []
+        self.periodo = periodo
+        self.iniciado_em = datetime.now()
+        self._inicio = time.monotonic()
+        #: Uma entrada por fonte, já no formato do JSON.
+        self.linhas: list[dict[str, Any]] = []
 
-    def registrar(self, resultado: ResultadoExtracao, arquivo: Path | None) -> None:
-        linha = resultado.resumo()
-        linha["arquivo"] = str(arquivo) if arquivo else None
-        self.linhas.append(linha)
+    def registrar(
+        self,
+        resultado: ResultadoExtracao,
+        *,
+        relatorios: list[RelatorioTabela] | None = None,
+        carregadas: dict[str, int] | None = None,
+        duracao_transformacao: float | None = None,
+        duracao_carga: float | None = None,
+        erro: str | None = None,
+    ) -> None:
+        """Registra uma fonte. `erro` já vem com a etapa: "carga: ...".
 
+        Sem `erro` explícito, vale o erro da extração, se houver.
+        """
+        if erro is None and resultado.erro is not None:
+            erro = f"extracao: {resultado.erro}"
+
+        carregadas = carregadas or {}
+        tabelas = {
+            relatorio.tabela: {
+                "transformadas": relatorio.linhas,
+                "carregadas": carregadas.get(relatorio.tabela),
+                "itens_vazios_ignorados": relatorio.itens_vazios_ignorados,
+                "duplicadas_descartadas": relatorio.duplicadas_descartadas,
+                "sem_chave_descartadas": relatorio.sem_chave_descartadas,
+                "falhas_de_conversao": relatorio.falhas_de_conversao,
+                "campos_ausentes": relatorio.campos_ausentes,
+                "campos_desconhecidos": relatorio.campos_desconhecidos,
+                "tem_alertas": relatorio.tem_alertas,
+            }
+            for relatorio in relatorios or []
+        }
+
+        self.linhas.append({
+            "fonte": resultado.fonte,
+            "sucesso": erro is None,
+            "erro": erro,
+            "extracao": {
+                "caminho": resultado.caminho,
+                "periodo_inicio": resultado.periodo.inicio_iso,
+                "periodo_fim": resultado.periodo.fim_iso,
+                "registros": resultado.quantidade,
+                "duracao_segundos": round(resultado.duracao_segundos, 2),
+                "executado_em": resultado.executado_em.strftime(FORMATO_DATA_HORA),
+            },
+            "transformacao": _etapa(duracao_transformacao),
+            "carga": _etapa(duracao_carga),
+            "tabelas": tabelas,
+        })
+
+    # -- leitura --------------------------------------------------------------
     @property
-    def falhas(self) -> list[dict]:
+    def falhas(self) -> list[dict[str, Any]]:
         return [linha for linha in self.linhas if not linha["sucesso"]]
 
     @property
     def total_registros(self) -> int:
-        return sum(linha["registros"] for linha in self.linhas)
+        return sum(linha["extracao"]["registros"] for linha in self.linhas)
 
-    def para_dataframe(self) -> pl.DataFrame:
-        # Esquema fixo: sem ele, um ciclo sem erros grava `erro` como Null e um
-        # com erros como String, e os Parquets deixam de ser lidos juntos.
-        return pl.DataFrame(self.linhas, schema=ESQUEMA_MANIFESTO)
+    @property
+    def tabelas_com_alerta(self) -> int:
+        return sum(
+            1 for linha in self.linhas for tabela in linha["tabelas"].values() if tabela["tem_alertas"]
+        )
 
+    def para_dicionario(self) -> dict[str, Any]:
+        return {
+            "executado_em": self.iniciado_em.strftime(FORMATO_DATA_HORA),
+            "periodo": (
+                {"inicio": self.periodo.inicio_iso, "fim": self.periodo.fim_iso} if self.periodo else None
+            ),
+            "duracao_segundos": round(time.monotonic() - self._inicio, 2),
+            "sucesso": not self.falhas,
+            "tabelas_com_alerta": self.tabelas_com_alerta,
+            "fontes": self.linhas,
+        }
+
+    # -- gravação -------------------------------------------------------------
     def gravar(self) -> Path | None:
         if not self.linhas:
             return None
@@ -118,8 +121,12 @@ class ManifestoExecucao:
         self.diretorio_manifesto.mkdir(parents=True, exist_ok=True)
         # Microssegundos no nome: na carga histórica duas janelas podem
         # terminar no mesmo segundo, e uma sobrescreveria a outra.
-        destino = self.diretorio_manifesto / f"execucao_{datetime.now():%Y%m%d_%H%M%S_%f}.parquet"
-        self.para_dataframe().write_parquet(destino)
+        destino = self.diretorio_manifesto / f"execucao_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+        temporario = destino.with_name(destino.name + ".tmp")
+        with temporario.open("w", encoding="utf-8") as arquivo:
+            json.dump(self.para_dicionario(), arquivo, ensure_ascii=False, indent=2, default=str)
+        temporario.replace(destino)
+
         logger.info("Manifesto gravado em %s", destino)
         return destino
 
@@ -127,8 +134,15 @@ class ManifestoExecucao:
         """Resumo curto do ciclo, para o log e para o retorno do main."""
         total = len(self.linhas)
         falhas = self.falhas
-        texto = f"{total - len(falhas)}/{total} fontes coletadas, {self.total_registros} registros."
+        texto = f"{total - len(falhas)}/{total} fontes processadas, {self.total_registros} registros."
         if falhas:
             nomes = ", ".join(linha["fonte"] for linha in falhas)
             texto += f" Falhas: {nomes}."
+        if self.tabelas_com_alerta:
+            texto += f" {self.tabelas_com_alerta} tabelas com alerta."
         return texto
+
+
+def _etapa(duracao: float | None) -> dict[str, float] | None:
+    """None quando a etapa não chegou a rodar (a anterior falhou)."""
+    return None if duracao is None else {"duracao_segundos": round(duracao, 2)}
