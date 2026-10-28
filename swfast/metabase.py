@@ -72,7 +72,9 @@ def moeda(*colunas: str) -> dict[str, Any]:
 
 
 def eixos(dimensao: str, *metricas: str, **extra: Any) -> dict[str, Any]:
-    # Sem o agrupamento automático em "Outros": um top 15 mostra os 15.
+    # Sem o agrupamento automático em "Outros" (barras e pizza). No gráfico
+    # de linhas horizontais ("row") quem decide é a altura do card: os top 15
+    # têm altura 11 para caberem os 15.
     return {
         "graph.dimensions": [dimensao], "graph.metrics": list(metricas),
         "graph.max_categories_enabled": False, **extra,
@@ -151,24 +153,24 @@ PERGUNTAS: tuple[Pergunta, ...] = (
     _p("Top 15 produtos por quantidade", PRODUTOS, "painel_produtos",
        'SELECT produto AS "Produto", sum(qtd_produtos) AS "Quantidade" '
        "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
-       "row", (0, 0, 12, 8), eixos("Produto", "Quantidade")),
+       "row", (0, 0, 12, 11), eixos("Produto", "Quantidade")),
     _p("Top 15 produtos por valor", PRODUTOS, "painel_produtos",
        'SELECT produto AS "Produto", sum(valor_produto) AS "Valor" '
        "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
-       "row", (0, 12, 12, 8), {**eixos("Produto", "Valor"), **moeda("Valor")}),
+       "row", (0, 12, 12, 11), {**eixos("Produto", "Valor"), **moeda("Valor")}),
     _p("Vendas por grupo", PRODUTOS, "painel_produtos",
        'SELECT grupo AS "Grupo", sum(valor_produto) AS "Valor" '
        "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (8, 0, 12, 7), {**eixos("Grupo", "Valor"), **moeda("Valor")}),
+       "bar", (11, 0, 12, 7), {**eixos("Grupo", "Valor"), **moeda("Valor")}),
     _p("Vendas por subgrupo", PRODUTOS, "painel_produtos",
        'SELECT grupo AS "Grupo", sub_grupo AS "Subgrupo", sum(qtd_produtos) AS "Quantidade", '
        'sum(valor_produto) AS "Valor" FROM painel_produtos WHERE {{data}} GROUP BY 1, 2 ORDER BY 4 DESC',
-       "table", (8, 12, 12, 7), moeda("Valor")),
+       "table", (11, 12, 12, 7), moeda("Valor")),
     _p("Itens em promoção", PRODUTOS, "painel_produtos",
        'SELECT promocao AS "Promoção", produto AS "Produto", sum(qtd_produtos) AS "Quantidade", '
        'sum(valor_produto) AS "Valor" FROM painel_produtos WHERE {{data}} AND promocao IS NOT NULL '
        "GROUP BY 1, 2 ORDER BY 4 DESC",
-       "table", (15, 0, 24, 6), moeda("Valor")),
+       "table", (18, 0, 24, 6), moeda("Valor")),
     # -- Pagamentos e descontos -------------------------------------------------
     _p("Total de descontos", PAGAMENTOS, "painel_descontos",
        'SELECT coalesce(sum(valor_desconto), 0) AS "Descontos" FROM painel_descontos WHERE {{data}}',
