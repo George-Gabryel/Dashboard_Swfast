@@ -1,11 +1,11 @@
 # ETL Swfast em container — roda um ciclo ao subir e depois a cada
 # INTERVALO_HORAS (.env, padrão 3h: 00h, 03h, 06h... 21h).
 #
-# O banco NÃO está aqui: ele vem do compose próprio dele (projeto
-# "dashboard-swfast", serviço "postgres"). Este container entra na rede
-# daquele projeto e acessa o banco pelo nome "postgres". Suba o banco antes:
-#     cd <pasta do compose do banco> && docker compose up -d
-#     cd <esta pasta>                && docker compose up -d --build
+# O banco NÃO está aqui: ele vem do compose próprio dele, em docker_postgre/
+# (projeto "dashboard-swfast", serviço "postgres"). Este container entra na
+# rede daquele projeto e acessa o banco pelo nome "postgres". Suba o banco antes:
+#     cd docker_postgre && docker compose up -d
+#     cd ..             && docker compose up -d --build
 #
 # Acompanhar:   docker logs -f swfast-etl
 # Manifestos:   ./data/_manifesto/*.json      Logs: ./data/_logs/*.log
@@ -23,9 +23,9 @@
 #        Marcar:  "Executar estando o usuário conectado ou não"
 #        Ação:    wsl.exe  -d Ubuntu --exec sleep infinity
 #      (liga o WSL no boot e o mantém de pé; sem isso ele só sobe no login)
-#   3. Deixe este projeto, o compose do banco, o .env e data/ dentro do
-#      Linux (ex.: ~/swfast), não em /mnt/c — mais rápido e sem problema de
-#      permissão nas pastas montadas.
+#   3. Deixe este repositório (com docker_postgre/, os .env e data/) dentro
+#      do Linux (ex.: ~/swfast), não em /mnt/c — mais rápido e sem problema
+#      de permissão nas pastas montadas.
 
 name: swfast-etl
 

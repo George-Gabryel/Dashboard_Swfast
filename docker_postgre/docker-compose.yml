@@ -1,0 +1,48 @@
+# PostgreSQL do Swfast — compose próprio: atualizar ou parar o ETL e o
+# Metabase não derruba o banco.
+#
+# O nome do projeto ("dashboard-swfast") é fixo de propósito: dele saem a
+# rede "dashboard-swfast_default", em que o ETL e o Metabase entram, e o
+# volume "dashboard-swfast_pgdata", onde ficam os dados. Mudar o nome cria
+# um banco novo e vazio.
+#
+# Variáveis: .env.postgre nesta pasta (modelo: .env.postgre.example).
+#     cd docker_postgre && docker compose up -d
+
+name: dashboard-swfast
+
+services:
+  postgres:
+    image: postgres:18
+
+    container_name: swfast-postgres
+
+    restart: unless-stopped
+
+    # POSTGRES_DB, POSTGRES_USER e POSTGRES_PASSWORD vão direto para o
+    # container. Não dá para usar ${...} no compose: a interpolação só lê o
+    # arquivo .env, e este se chama .env.postgre para não ser confundido
+    # com o .env do ETL na raiz.
+    env_file: .env.postgre
+    environment:
+      TZ: America/Recife
+
+    ports:
+      # Só nesta máquina. Para trocar a porta, troque aqui e o
+      # POSTGRES_PORT do .env do ETL.
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - ./backups:/backups
+
+    healthcheck:
+      # $$: a variável é lida pelo shell do container, que a recebe do env_file.
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

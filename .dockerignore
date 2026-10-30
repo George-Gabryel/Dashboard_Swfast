@@ -4,6 +4,9 @@
 .venv
 .env
 .env.meta
+metabase
+# Compose do banco: tem o .env.postgre (senha) e os backups.
+docker_postgre
 .pytest_cache
 __pycache__
 **/__pycache__

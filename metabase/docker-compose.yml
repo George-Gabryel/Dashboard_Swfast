@@ -9,6 +9,7 @@
 # Ele é só do Metabase — este container não recebe a chave da API Swfast.
 #
 # Instalação (uma vez, nesta ordem, a partir da raiz do repositório):
+#   0. cd docker_postgre && docker compose up -d && cd ..  # banco
 #   1. docker compose up -d --build                         # ETL: cria tabelas e views
 #   2. docker compose -f metabase/docker-compose.yml up -d  # Metabase
 #   3. docker compose run --rm instalar-dashboard

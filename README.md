@@ -78,6 +78,11 @@ Dashboard_Swfast/
 │   ├── gravador.py          Manifesto JSON de cada ciclo
 │   ├── pipeline.py          Orquestra E → T → L por fonte
 │   └── metabase.py          Instalador do dashboard no Metabase (via API, sem cliques)
+├── docker_postgre/
+│   ├── docker-compose.yml   Postgres 18, projeto "dashboard-swfast", porta 127.0.0.1:5432
+│   ├── .env.postgre.example Modelo de configuração do banco (nome, usuário e senha)
+│   ├── init/01-schemas.sql  Executado só na primeira criação do volume
+│   └── backups/             Montada em /backups no container (fora do git)
 ├── metabase/
 │   ├── docker-compose.yml   Container do Metabase
 │   └── abrir_dashboard.ps1  Atalho do cliente no Windows (liga os containers e abre o Edge)
@@ -88,14 +93,13 @@ Dashboard_Swfast/
 └── .env.meta.example        Modelo de configuração do Metabase
 ```
 
-O compose do banco fica **fora** deste repositório, na pasta `docker_postgre/`:
+Cada parte tem seu próprio compose e seu próprio arquivo de variáveis, para que nenhum container receba senhas de que não precisa:
 
-```
-docker_postgre/
-├── docker-compose.yml       Postgres 18, projeto "dashboard-swfast", porta 127.0.0.1:5432
-├── .env.example             Nome do banco, usuário e senha
-└── init/01-schemas.sql      Executado só na primeira criação do volume
-```
+| Compose                             | Arquivo de variáveis        | Quem lê                          |
+|-------------------------------------|-----------------------------|----------------------------------|
+| `docker_postgre/docker-compose.yml` | `docker_postgre/.env.postgre` | Postgres                        |
+| `docker-compose.yml`                | `.env` (+ `.env.meta` no `instalar-dashboard`) | ETL e instalador do dashboard |
+| `metabase/docker-compose.yml`       | `.env.meta`                 | Metabase                         |
 
 ### Detalhes de cada etapa
 
@@ -199,37 +203,31 @@ docker compose version
 
 ### 2. Copiar os arquivos
 
-Você precisa de duas pastas: este repositório (`Dashboard_Swfast`) e a pasta do banco (`docker_postgre`). Exemplo de organização:
-
-```
-C:\swfast\
-├── docker_postgre\
-└── Dashboard_Swfast\
-```
+Tudo está neste repositório, inclusive o compose do banco (`docker_postgre/`):
 
 ```powershell
 mkdir C:\swfast; cd C:\swfast
 git clone <url-do-repositorio> Dashboard_Swfast
-# copie a pasta docker_postgre para C:\swfast\docker_postgre
 ```
 
-> **Opção B:** coloque as duas pastas **dentro do Linux** (ex.: `~/swfast`), e não em `/mnt/c/...`. Fica mais rápido e evita problemas de permissão nas pastas montadas.
+Os arquivos `.env`, `.env.meta`, `docker_postgre\.env.postgre` e a pasta `data\` **não estão no git**. São criados nos passos seguintes.
+
+> **Opção B:** clone **dentro do Linux** (ex.: `~/swfast`), e não em `/mnt/c/...`. Fica mais rápido e evita problemas de permissão nas pastas montadas.
 
 ### 3. Subir o banco
 
 ```powershell
-cd C:\swfast\docker_postgre
-copy .env.example .env
-notepad .env
+cd C:\swfast\Dashboard_Swfast\docker_postgre
+copy .env.postgre.example .env.postgre
+notepad .env.postgre
 ```
 
-Preencha o `.env`. **Não deixe espaços em volta do `=`**:
+Preencha o `.env.postgre`. **Não deixe espaços em volta do `=`**:
 
 ```ini
 POSTGRES_DB=swfast
 POSTGRES_USER=swfast
 POSTGRES_PASSWORD=<uma senha forte>
-POSTGRES_PORT=5432
 ```
 
 ```powershell
@@ -239,7 +237,11 @@ docker ps      # swfast-postgres deve aparecer como "healthy"
 
 Esse comando também cria a rede `dashboard-swfast_default`, que os outros containers usam.
 
-> ⚠️ O usuário e a senha só são aplicados **na primeira vez**, quando o volume `pgdata` é criado. Se mudar o `.env` depois, o banco continua com a senha antiga. Para recomeçar do zero, rode `docker compose down -v`, o que **apaga todos os dados**.
+O arquivo se chama `.env.postgre`, e não `.env`, para não ser confundido com o `.env` do ETL. Por isso o compose o carrega com `env_file:`, que passa as variáveis direto para o container, em vez de usar `${...}`. A porta publicada é fixa (`127.0.0.1:5432`) no `docker-compose.yml`. Para trocá-la, altere ali e no `POSTGRES_PORT` do `.env` do ETL.
+
+> ⚠️ O usuário e a senha só são aplicados **na primeira vez**, quando o volume `pgdata` é criado. Se mudar o `.env.postgre` depois, o banco continua com a senha antiga. Para recomeçar do zero, rode `docker compose down -v`, o que **apaga todos os dados**.
+
+> ⚠️ Não mude o `name: dashboard-swfast` do compose do banco. Dele saem o nome do volume com os dados (`dashboard-swfast_pgdata`) e o nome da rede que o ETL e o Metabase usam.
 
 ### 4. Configurar e subir o ETL
 
@@ -251,7 +253,7 @@ notepad .env
 
 Itens obrigatórios:
 - `SWFAST_API_KEY`: a chave do cliente.
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: **idênticos** aos do `docker_postgre\.env`.
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: **idênticos** aos do `docker_postgre\.env.postgre`.
 - `POSTGRES_HOST=127.0.0.1` e `POSTGRES_PORT=5432` podem ficar assim. Dentro do container, o compose troca esses valores por `postgres:5432`.
 
 Se a conta for de **loja central** e for preciso filtrar lojas, preencha `LISTA_DE_LOJAS` com os códigos separados por vírgula.
@@ -443,9 +445,9 @@ Os testes de integração de `tests/test_banco.py` sobem um Postgres temporário
 | `ESPERA_INICIAL_RETENTATIVA` | `2`                                       | Primeira espera entre tentativas (dobra a cada nova tentativa) |
 | `POSTGRES_HOST`              | `localhost`                               | Use `127.0.0.1` no Windows; o container sobrescreve            |
 | `POSTGRES_PORT`              | `5432`                                    | Porta publicada do Postgres                                    |
-| `POSTGRES_DB`                | **obrigatória**                           | Igual ao `docker_postgre\.env`                                 |
-| `POSTGRES_USER`              | **obrigatória**                           | Igual ao `docker_postgre\.env`                                 |
-| `POSTGRES_PASSWORD`          | **obrigatória**                           | Igual ao `docker_postgre\.env`                                 |
+| `POSTGRES_DB`                | **obrigatória**                           | Igual ao `docker_postgre\.env.postgre`                         |
+| `POSTGRES_USER`              | **obrigatória**                           | Igual ao `docker_postgre\.env.postgre`                         |
+| `POSTGRES_PASSWORD`          | **obrigatória**                           | Igual ao `docker_postgre\.env.postgre`                         |
 | `DIRETORIO_DADOS`            | `data`                                    | Onde ficam `_manifesto/` e `_logs/`                            |
 | `LISTA_DE_LOJAS`             | vazio                                     | Filtro de lojas (só para lojas centrais, só em `vendas`)       |
 | `USAR_LOJA_ID_EXTERNO`       | `true`                                    | Se os códigos de `LISTA_DE_LOJAS` são IDs externos             |
@@ -463,7 +465,17 @@ Os testes de integração de `tests/test_banco.py` sobem um Postgres temporário
 | `METABASE_URL`            | `http://metabase:3000`   | Endereço do Metabase visto pelo container          |
 | `METABASE_URL_PUBLICA`    | `http://127.0.0.1:3000`  | Endereço que o navegador do cliente usa            |
 
-`.env` e `.env.meta` contêm senhas e estão no `.gitignore`. **Nunca faça commit desses arquivos.**
+### `docker_postgre/.env.postgre` (banco)
+
+| Variável            | Descrição                                                            |
+|---------------------|----------------------------------------------------------------------|
+| `POSTGRES_DB`       | Nome do banco de dados criado na primeira subida                     |
+| `POSTGRES_USER`     | Usuário dono do banco (superusuário do Postgres)                     |
+| `POSTGRES_PASSWORD` | Senha desse usuário                                                  |
+
+As três só valem na primeira subida, quando o volume ainda está vazio.
+
+`.env`, `.env.meta` e `docker_postgre/.env.postgre` contêm senhas e estão no `.gitignore`. **Nunca faça commit desses arquivos.**
 
 ---
 
@@ -472,6 +484,7 @@ Os testes de integração de `tests/test_banco.py` sobem um Postgres temporário
 | Sintoma                                                                 | Causa provável / solução                                                                                       |
 |-------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
 | `network dashboard-swfast_default declared as external, but could not be found` | O banco não foi iniciado. Rode `docker compose up -d` em `docker_postgre` primeiro.                     |
+| `env file ...\.env.postgre not found`                                   | Falta criar o `docker_postgre\.env.postgre` a partir do `.env.postgre.example` (passo 3).                      |
 | Log: `usuário ou senha recusados`                                       | O `.env` do ETL não bate com o do banco, ou a senha foi trocada depois de criar o volume (ver passo 3).        |
 | Log: `Postgres ... inacessível`                                         | O container `swfast-postgres` está parado: `docker start swfast-postgres`.                                     |
 | Log: `401`/`403 ... Confira a API-Key`                                  | Chave errada, expirada ou sem acesso ao endpoint.                                                              |
