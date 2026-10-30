@@ -42,13 +42,31 @@ NOME_COLECAO = "Swfast"
 NOME_DASHBOARD = "Swfast — Vendas"
 ARQUIVO_URL = "dashboard_url.txt"
 
-ABAS = ("Visão geral", "Produtos", "Pagamentos e descontos", "Cancelamentos e equipe")
-PARAMETRO_PERIODO = {
-    "id": "periodo",
-    "name": "Período",
-    "slug": "periodo",
-    "type": "date/all-options",
-    "default": "past30days",
+ABAS = ("Faturamento", "Produtos", "Pagamentos e descontos", "Cancelamentos")
+FATURAMENTO, PRODUTOS, PAGAMENTOS, CANCELAMENTOS = ABAS
+
+# Filtros do dashboard. Cada pergunta diz quais usa (ver `Filtro`).
+QUANTIDADE, VALOR = "Quantidade", "Valor (R$)"
+PARAMETROS: dict[str, dict[str, Any]] = {
+    "periodo": {
+        "id": "periodo", "name": "Período", "slug": "periodo",
+        "type": "date/all-options", "default": "past30days",
+    },
+    # Exclusivo do "Faturamento por dia": o gráfico mostra no máximo os 7
+    # últimos dias do intervalo escolhido (o Metabase não trava o seletor).
+    "dias": {
+        "id": "dias", "name": "Dias (máx. 7)", "slug": "dias",
+        "type": "date/all-options", "default": "past7days",
+    },
+    # O "botão" Valor/Quantidade da aba Produtos: o Metabase não tem botão de
+    # alternar, então é um filtro de lista com duas opções e uma sempre marcada.
+    "metrica": {
+        "id": "metrica", "name": "Exibir", "slug": "exibir",
+        "type": "string/=", "sectionId": "string",
+        "values_query_type": "list", "values_source_type": "static-list",
+        "values_source_config": {"values": [VALOR, QUANTIDADE]},
+        "default": [VALOR], "required": True, "isMultiSelect": False,
+    },
 }
 
 
@@ -73,11 +91,23 @@ def moeda(*colunas: str) -> dict[str, Any]:
 
 def eixos(dimensao: str, *metricas: str, **extra: Any) -> dict[str, Any]:
     # Sem o agrupamento automático em "Outros" (barras e pizza). No gráfico
-    # de linhas horizontais ("row") quem decide é a altura do card: os top 15
-    # têm altura 11 para caberem os 15.
+    # de linhas horizontais ("row") quem decide é a altura do card.
     return {
         "graph.dimensions": [dimensao], "graph.metrics": list(metricas),
         "graph.max_categories_enabled": False, **extra,
+    }
+
+
+def combo(dimensao: str, barra: str, linha: str, valores_nas_barras: bool = False) -> dict[str, Any]:
+    """Barras + linha no mesmo gráfico, cada uma com seu eixo (imagens 3 e 4)."""
+    return {
+        **eixos(dimensao, barra, linha),
+        "graph.y_axis.auto_split": True,
+        "graph.show_values": valores_nas_barras,
+        "series_settings": {
+            barra: {"display": "bar", "show_series_values": valores_nas_barras},
+            linha: {"display": "line", "show_series_values": False},
+        },
     }
 
 
@@ -90,140 +120,275 @@ FORMATACAO_BRASILEIRA = {
 
 
 @dataclass(frozen=True)
-class Pergunta:
-    """Uma pergunta (card) e onde ela fica no dashboard (grade de 24 colunas).
+class Filtro:
+    """Liga uma variável `{{tag}}` do SQL a um filtro do dashboard.
 
-    `view` é de onde sai a coluna `data` que o filtro de período usa; o SQL
-    tem `WHERE {{data}}` — sem período escolhido, o Metabase troca por 1=1.
+    Com `view`, é um filtro de data ("field filter") sobre a coluna `data`
+    dessa view — e a view não pode ter apelido no SQL, porque o Metabase
+    escreve o nome completo da tabela. Sem `view`, é uma variável de texto.
     """
 
-    nome: str
+    tag: str
+    parametro: str
+    view: str | None = None
+
+
+def periodo(view: str) -> Filtro:
+    return Filtro("data", "periodo", view)
+
+
+DIAS = Filtro("dias", "dias", "painel_calendario")
+METRICA = Filtro("metrica", "metrica")
+
+
+@dataclass(frozen=True)
+class Posicao:
+    """Onde um card fica: aba e retângulo na grade de 24 colunas."""
+
     aba: str
-    view: str
-    sql: str
-    display: str
     linha: int
     coluna: int
     largura: int
     altura: int
+
+
+@dataclass(frozen=True)
+class Pergunta:
+    """Uma pergunta (card): o SQL, o gráfico, os filtros e onde aparece.
+
+    Uma pergunta pode aparecer em mais de uma aba (ex.: Desconto); é um
+    card só no Metabase, com um cartão no dashboard para cada posição.
+    """
+
+    nome: str
+    sql: str
+    display: str
+    posicoes: tuple[Posicao, ...]
+    filtros: tuple[Filtro, ...]
     ajustes: dict[str, Any] = field(default_factory=dict)
 
 
-def _p(nome, aba, view, consulta, display, posicao, ajustes=None) -> Pergunta:
-    linha, coluna, largura, altura = posicao
-    return Pergunta(nome, aba, view, " ".join(consulta.split()), display, linha, coluna, largura, altura, ajustes or {})
+def _p(nome, consulta, display, posicoes, filtros, ajustes=None) -> Pergunta:
+    if isinstance(posicoes, Posicao):
+        posicoes = (posicoes,)
+    return Pergunta(nome, " ".join(consulta.split()), display, tuple(posicoes), tuple(filtros), ajustes or {})
 
 
-GERAL, PRODUTOS, PAGAMENTOS, CANCELAMENTOS = ABAS
+def kpi_comparado(nome: str, expressao: str, view: str, posicoes, negativo_e_bom: bool = False,
+                  em_reais: bool = True) -> Pergunta:
+    """Bloco com o valor do período e a variação contra o período anterior.
+
+    O filtro "Período" age no calendário: daí sai o início e o fim escolhidos
+    (até em "Últimos 30 dias" ou "Este mês"). O período anterior termina na
+    véspera do início e:
+    - se o escolhido são meses cheios (ex.: "Este mês" = 1 a 31/10), volta o
+      mesmo número de meses: outubro compara com setembro inteiro;
+    - senão, volta o mesmo número de dias: últimos 7 dias contra os 7
+      anteriores, esta semana contra a semana passada.
+    O SQL devolve duas linhas (anterior e atual) e o gráfico "Tendência" do
+    Metabase mostra o atual e o % de diferença.
+    """
+    consulta = f"""
+        WITH escolhido AS (
+            SELECT min(data) AS inicio, max(data) AS fim FROM painel_calendario WHERE {{{{data}}}}
+        ),
+        medida AS (
+            SELECT inicio, fim,
+                   inicio = date_trunc('month', inicio)::date
+                       AND fim = (date_trunc('month', fim) + interval '1 month - 1 day')::date AS meses_cheios,
+                   ((extract(year FROM fim) - extract(year FROM inicio)) * 12
+                       + extract(month FROM fim) - extract(month FROM inicio) + 1)::int AS meses
+            FROM escolhido
+        ),
+        periodos AS (
+            SELECT CASE WHEN meses_cheios THEN (inicio - make_interval(months => meses))::date
+                        ELSE inicio - (fim - inicio + 1) END AS inicio,
+                   inicio - 1 AS fim
+            FROM medida
+            UNION ALL
+            SELECT inicio, fim FROM medida
+        )
+        SELECT periodos.inicio AS "Período",
+               (SELECT {expressao} FROM {view} WHERE {view}.data BETWEEN periodos.inicio AND periodos.fim) AS "{nome}"
+        FROM periodos
+        ORDER BY 1
+    """
+    ajustes = {
+        "scalar.field": nome,
+        "scalar.comparisons": [{"id": "anterior", "type": "previousValue"}],
+        # Desconto subindo é ruim: inverte as cores (subida em vermelho).
+        "scalar.switch_positive_negative": negativo_e_bom,
+        **(moeda(nome) if em_reais else {}),
+    }
+    return _p(nome, consulta, "smartscalar", posicoes, (Filtro("data", "periodo", "painel_calendario"),), ajustes)
+
+
+# A medida escolhida no filtro "Exibir".
+MEDIDA_ESCOLHIDA = f"CASE WHEN {{{{metrica}}}} = '{QUANTIDADE}' THEN sum(qtd_produtos) ELSE sum(valor_produto) END"
+
+
+def pizza_top5(nome: str, coluna: str, rotulo: str, posicao: Posicao) -> Pergunta:
+    """Os 5 maiores pela medida do "Exibir" e o resto somado em OUTROS.
+
+    Legenda com os nomes, % dentro das fatias e total no centro. O Metabase
+    não mostra uma segunda medida no tooltip da pizza: a outra (valor ou
+    quantidade) aparece trocando o "Exibir".
+    """
+    consulta = f"""
+        WITH medidas AS (
+            SELECT coalesce({coluna}, 'Sem {rotulo.lower()}') AS nome, {MEDIDA_ESCOLHIDA} AS total
+            FROM painel_produtos WHERE {{{{data}}}} GROUP BY 1
+        ),
+        ranking AS (SELECT nome, total, row_number() OVER (ORDER BY total DESC) AS posicao FROM medidas)
+        SELECT CASE WHEN posicao <= 5 THEN nome ELSE 'OUTROS' END AS "{rotulo}", sum(total) AS "Total"
+        FROM ranking GROUP BY 1 ORDER BY min(posicao)
+    """
+    ajustes = {
+        "pie.dimension": rotulo, "pie.metric": "Total",
+        "pie.show_legend": True, "pie.show_total": True,
+        "pie.percent_visibility": "inside", "pie.show_labels": False,
+        # Sem agrupar fatias pequenas: OUTROS já vem do SQL. O Metabase ordena
+        # as fatias por tamanho, então OUTROS fica onde o seu valor o põe.
+        "pie.slice_threshold": 0,
+    }
+    return _p(nome, consulta, "pie", posicao, (periodo(PRODUTOS_V), METRICA), ajustes)
+HORAS = "generate_series(0, 23) AS horas(hora)"
+DIAS_DA_SEMANA = (
+    "(VALUES (1, 'Segunda'), (2, 'Terça'), (3, 'Quarta'), (4, 'Quinta'), "
+    "(5, 'Sexta'), (6, 'Sábado'), (7, 'Domingo')) AS semana(numero, nome)"
+)
+VENDAS, PRODUTOS_V, PAGAMENTOS_V = "painel_vendas", "painel_produtos", "painel_pagamentos"
+DESCONTOS_V, ACRESCIMOS_V, CANCELAMENTOS_V = "painel_descontos", "painel_acrescimos", "painel_cancelamentos"
+
+
+def _pos(aba, linha, coluna, largura, altura) -> Posicao:
+    return Posicao(aba, linha, coluna, largura, altura)
+
 
 PERGUNTAS: tuple[Pergunta, ...] = (
-    # -- Visão geral --------------------------------------------------------
-    _p("Faturamento", GERAL, "painel_vendas",
-       'SELECT sum(valor_faturamento) AS "Faturamento" FROM painel_vendas WHERE {{data}}',
-       "scalar", (0, 0, 8, 3), moeda("Faturamento")),
-    _p("Vendas", GERAL, "painel_vendas",
-       'SELECT count(*) AS "Vendas" FROM painel_vendas WHERE {{data}}',
-       "scalar", (0, 8, 8, 3)),
-    _p("Ticket médio", GERAL, "painel_vendas",
-       'SELECT avg(valor_faturamento) AS "Ticket médio" FROM painel_vendas WHERE {{data}}',
-       "scalar", (0, 16, 8, 3), moeda("Ticket médio")),
-    _p("Pessoas atendidas", GERAL, "painel_vendas",
-       'SELECT sum(qtd_pessoas) AS "Pessoas" FROM painel_vendas WHERE {{data}}',
-       "scalar", (3, 0, 8, 3)),
-    _p("Média por pessoa", GERAL, "painel_vendas",
-       'SELECT sum(valor_faturamento) / nullif(sum(qtd_pessoas), 0) AS "Média por pessoa" '
-       "FROM painel_vendas WHERE {{data}}",
-       "scalar", (3, 8, 8, 3), moeda("Média por pessoa")),
-    _p("Taxa de serviço", GERAL, "painel_vendas",
+    # -- Faturamento ----------------------------------------------------------
+    kpi_comparado("Faturamento bruto", "sum(valor_bruto)", VENDAS, _pos(FATURAMENTO, 0, 0, 6, 4)),
+    kpi_comparado("Faturamento líquido", "sum(valor_liquido)", VENDAS, _pos(FATURAMENTO, 0, 6, 6, 4)),
+    kpi_comparado(
+        "Desconto", "coalesce(sum(valor_desconto_total), 0)", VENDAS,
+        (_pos(FATURAMENTO, 0, 12, 6, 4), _pos(PAGAMENTOS, 0, 0, 12, 4)),
+        negativo_e_bom=True,
+    ),
+    kpi_comparado(
+        "Ticket médio", "sum(valor_liquido) / nullif(sum(qtd_pessoas), 0)", VENDAS, _pos(FATURAMENTO, 0, 18, 6, 4),
+    ),
+    _p("Vendas", 'SELECT count(*) AS "Vendas" FROM painel_vendas WHERE {{data}}',
+       "scalar", _pos(FATURAMENTO, 4, 0, 8, 3), (periodo(VENDAS),)),
+    _p("Pessoas atendidas", 'SELECT sum(qtd_pessoas) AS "Pessoas" FROM painel_vendas WHERE {{data}}',
+       "scalar", _pos(FATURAMENTO, 4, 8, 8, 3), (periodo(VENDAS),)),
+    _p("Taxa de serviço",
        'SELECT sum(valor_taxa_servicos) AS "Taxa de serviço" FROM painel_vendas WHERE {{data}}',
-       "scalar", (3, 16, 8, 3), moeda("Taxa de serviço")),
-    _p("Faturamento por dia", GERAL, "painel_vendas",
-       'SELECT data AS "Dia", sum(valor_faturamento) AS "Faturamento", count(*) AS "Vendas" '
+       "scalar", _pos(FATURAMENTO, 4, 16, 8, 3), (periodo(VENDAS),), moeda("Taxa de serviço")),
+    # Só as horas que tiveram venda; o eixo pula as outras (ex.: 0, 13, 14...).
+    _p("Faturamento por hora",
+       'SELECT hora AS "Hora", sum(valor_liquido) AS "Faturamento", count(*) AS "Vendas" '
        "FROM painel_vendas WHERE {{data}} GROUP BY 1 ORDER BY 1",
-       "line", (6, 0, 24, 6), {**eixos("Dia", "Faturamento"), **moeda("Faturamento")}),
-    _p("Faturamento por hora do dia", GERAL, "painel_vendas",
-       'SELECT hora AS "Hora", sum(valor_faturamento) AS "Faturamento" '
-       "FROM painel_vendas WHERE {{data}} GROUP BY 1 ORDER BY 1",
-       "bar", (12, 0, 12, 6), {**eixos("Hora", "Faturamento"), **moeda("Faturamento")}),
-    _p("Faturamento por dia da semana", GERAL, "painel_vendas",
-       'SELECT dia_semana AS "Dia da semana", sum(valor_faturamento) AS "Faturamento" '
-       "FROM painel_vendas WHERE {{data}} GROUP BY dia_semana_numero, 1 ORDER BY dia_semana_numero",
-       "bar", (12, 12, 12, 6), {**eixos("Dia da semana", "Faturamento"), **moeda("Faturamento")}),
-    # -- Produtos -------------------------------------------------------------
-    _p("Top 15 produtos por quantidade", PRODUTOS, "painel_produtos",
-       'SELECT produto AS "Produto", sum(qtd_produtos) AS "Quantidade" '
-       "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
-       "row", (0, 0, 12, 11), eixos("Produto", "Quantidade")),
-    _p("Top 15 produtos por valor", PRODUTOS, "painel_produtos",
-       'SELECT produto AS "Produto", sum(valor_produto) AS "Valor" '
-       "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
-       "row", (0, 12, 12, 11), {**eixos("Produto", "Valor"), **moeda("Valor")}),
-    _p("Vendas por grupo", PRODUTOS, "painel_produtos",
-       'SELECT grupo AS "Grupo", sum(valor_produto) AS "Valor" '
+       "combo", _pos(FATURAMENTO, 7, 0, 24, 8), (periodo(VENDAS),),
+       {**combo("Hora", "Faturamento", "Vendas"), "graph.x_axis.scale": "ordinal", **moeda("Faturamento")}),
+    _p("Faturamento por dia da semana",
+       f'SELECT semana.nome AS "Dia da semana", coalesce(sum(valor_liquido), 0) AS "Faturamento" '
+       f"FROM {DIAS_DA_SEMANA} "
+       "LEFT JOIN painel_vendas ON painel_vendas.dia_semana_numero = semana.numero AND {{data}} "
+       "GROUP BY semana.numero, semana.nome ORDER BY semana.numero",
+       "line", _pos(FATURAMENTO, 15, 0, 12, 7), (periodo(VENDAS),),
+       {**eixos("Dia da semana", "Faturamento"), **moeda("Faturamento")}),
+    _p("Faturamento por dia (máx. 7 dias)",
+       'SELECT painel_calendario.data AS "Dia", coalesce(sum(valor_liquido), 0) AS "Faturamento" '
+       "FROM painel_calendario LEFT JOIN painel_vendas ON painel_vendas.data = painel_calendario.data "
+       "WHERE {{dias}} AND painel_calendario.data <= current_date "
+       "AND painel_calendario.data > (SELECT least(max(data), current_date) FROM painel_calendario WHERE {{dias}}) - 7 "
+       "GROUP BY 1 ORDER BY 1",
+       "line", _pos(FATURAMENTO, 15, 12, 12, 7), (DIAS,),
+       {**eixos("Dia", "Faturamento"), **moeda("Faturamento")}),
+    _p("Faturamento por operador de caixa",
+       'SELECT operador AS "Operador", sum(valor_liquido) AS "Faturamento", count(*) AS "Vendas" '
+       "FROM painel_vendas WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
+       "bar", _pos(FATURAMENTO, 22, 0, 12, 7), (periodo(VENDAS),),
+       {**eixos("Operador", "Faturamento"), **moeda("Faturamento")}),
+    _p("Vendas por atendente",
+       'SELECT coalesce(atendente, \'Sem atendente\') AS "Atendente", sum(valor_produto) AS "Valor" '
        "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (11, 0, 12, 7), {**eixos("Grupo", "Valor"), **moeda("Valor")}),
-    _p("Vendas por subgrupo", PRODUTOS, "painel_produtos",
-       'SELECT grupo AS "Grupo", sub_grupo AS "Subgrupo", sum(qtd_produtos) AS "Quantidade", '
-       'sum(valor_produto) AS "Valor" FROM painel_produtos WHERE {{data}} GROUP BY 1, 2 ORDER BY 4 DESC',
-       "table", (11, 12, 12, 7), moeda("Valor")),
-    _p("Itens em promoção", PRODUTOS, "painel_produtos",
-       'SELECT promocao AS "Promoção", produto AS "Produto", sum(qtd_produtos) AS "Quantidade", '
-       'sum(valor_produto) AS "Valor" FROM painel_produtos WHERE {{data}} AND promocao IS NOT NULL '
-       "GROUP BY 1, 2 ORDER BY 4 DESC",
-       "table", (18, 0, 24, 6), moeda("Valor")),
-    # -- Pagamentos e descontos -------------------------------------------------
-    _p("Total de descontos", PAGAMENTOS, "painel_descontos",
-       'SELECT coalesce(sum(valor_desconto), 0) AS "Descontos" FROM painel_descontos WHERE {{data}}',
-       "scalar", (0, 0, 12, 3), moeda("Descontos")),
-    _p("Total de acréscimos", PAGAMENTOS, "painel_acrescimos",
+       "row", _pos(FATURAMENTO, 22, 12, 12, 7), (periodo(PRODUTOS_V),),
+       {**eixos("Atendente", "Valor"), **moeda("Valor")}),
+    # -- Produtos (segue o filtro "Exibir: Valor / Quantidade") ----------------
+    kpi_comparado("Valor dos produtos vendidos", "sum(valor_produto)", PRODUTOS_V, _pos(PRODUTOS, 0, 0, 24, 4)),
+    _p("Top 10 produtos",
+       f'SELECT produto AS "Produto", {MEDIDA_ESCOLHIDA} AS "Total" '
+       "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC LIMIT 10",
+       "row", _pos(PRODUTOS, 4, 0, 24, 9), (periodo(PRODUTOS_V), METRICA),
+       eixos("Produto", "Total")),
+    pizza_top5("Top 5 grupos", "grupo", "Grupo", _pos(PRODUTOS, 13, 0, 12, 9)),
+    pizza_top5("Top 5 subgrupos", "sub_grupo", "Subgrupo", _pos(PRODUTOS, 13, 12, 12, 9)),
+    # -- Pagamentos e descontos (o bloco Desconto vem da aba Faturamento) -------
+    _p("Total de acréscimos",
        'SELECT coalesce(sum(valor_taxa), 0) AS "Acréscimos" FROM painel_acrescimos WHERE {{data}}',
-       "scalar", (0, 12, 12, 3), moeda("Acréscimos")),
-    _p("Valor por forma de pagamento", PAGAMENTOS, "painel_pagamentos",
-       'SELECT forma_pagamento AS "Forma de pagamento", sum(valor_pagamento) AS "Valor" '
-       "FROM painel_pagamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "row", (3, 0, 12, 8), {**eixos("Forma de pagamento", "Valor"), **moeda("Valor")}),
-    _p("Pagamentos por tipo", PAGAMENTOS, "painel_pagamentos",
+       "scalar", _pos(PAGAMENTOS, 0, 12, 12, 4), (periodo(ACRESCIMOS_V),), moeda("Acréscimos")),
+    _p("Faturamento por forma de pagamento",
+       'SELECT forma_pagamento AS "Forma de pagamento", sum(valor_pagamento) AS "Faturamento", '
+       'count(DISTINCT id_venda) AS "Vendas" FROM painel_pagamentos WHERE {{data}} '
+       "GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
+       "combo", _pos(PAGAMENTOS, 4, 0, 16, 8), (periodo(PAGAMENTOS_V),),
+       {**combo("Forma de pagamento", "Faturamento", "Vendas", valores_nas_barras=True), **moeda("Faturamento")}),
+    _p("Pagamentos por tipo",
        'SELECT tipo_pagamento AS "Tipo", sum(valor_pagamento) AS "Valor" '
        "FROM painel_pagamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "pie", (3, 12, 12, 8), {"pie.dimension": "Tipo", "pie.metric": "Valor", **moeda("Valor")}),
-    _p("Descontos por motivo", PAGAMENTOS, "painel_descontos",
-       'SELECT tipo_desconto AS "Tipo", desconto AS "Desconto", motivo AS "Motivo", '
-       'count(*) AS "Quantidade", sum(valor_desconto) AS "Valor" '
-       "FROM painel_descontos WHERE {{data}} GROUP BY 1, 2, 3 ORDER BY 5 DESC",
-       "table", (11, 0, 12, 7), moeda("Valor")),
-    _p("Acréscimos por tipo", PAGAMENTOS, "painel_acrescimos",
+       "pie", _pos(PAGAMENTOS, 4, 16, 8, 8), (periodo(PAGAMENTOS_V),),
+       {"pie.dimension": "Tipo", "pie.metric": "Valor", **moeda("Valor")}),
+    _p("Desconto por tipo",
+       'SELECT tipo AS "Tipo", valor AS "Valor" FROM ('
+       "SELECT 1 AS ordem, 'Convênios' AS tipo, coalesce(sum(valor_descontos), 0) AS valor FROM painel_vendas WHERE {{data}} "
+       "UNION ALL SELECT 2, 'Combos', coalesce(sum(valor_combos), 0) FROM painel_vendas WHERE {{data}} "
+       "UNION ALL SELECT 3, 'Cortesias', coalesce(sum(valor_cortesias), 0) FROM painel_vendas WHERE {{data}}"
+       ") AS tipos ORDER BY ordem",
+       "bar", _pos(PAGAMENTOS, 12, 0, 12, 7), (periodo(VENDAS),),
+       {**eixos("Tipo", "Valor"), "graph.show_values": True, **moeda("Valor")}),
+    _p("Acréscimos por tipo",
        'SELECT tipo_taxa AS "Tipo", sum(valor_taxa) AS "Valor" '
        "FROM painel_acrescimos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (11, 12, 12, 7), {**eixos("Tipo", "Valor"), **moeda("Valor")}),
-    # -- Cancelamentos e equipe -------------------------------------------------
-    _p("Valor cancelado", CANCELAMENTOS, "painel_cancelamentos",
+       "bar", _pos(PAGAMENTOS, 12, 12, 12, 7), (periodo(ACRESCIMOS_V),),
+       {**eixos("Tipo", "Valor"), **moeda("Valor")}),
+    _p("Descontos por motivo",
+       'SELECT desconto AS "Desconto", motivo AS "Motivo", '
+       'count(*) AS "Quantidade", sum(valor_desconto) AS "Valor" '
+       "FROM painel_descontos WHERE {{data}} GROUP BY 1, 2 ORDER BY 4 DESC",
+       "table", _pos(PAGAMENTOS, 19, 0, 24, 7), (periodo(DESCONTOS_V),), moeda("Valor")),
+    # -- Cancelamentos ------------------------------------------------------------
+    _p("Valor cancelado",
        'SELECT coalesce(sum(valor_produto), 0) AS "Valor cancelado" FROM painel_cancelamentos WHERE {{data}}',
-       "scalar", (0, 0, 12, 3), moeda("Valor cancelado")),
-    _p("Itens cancelados", CANCELAMENTOS, "painel_cancelamentos",
+       "scalar", _pos(CANCELAMENTOS, 0, 0, 12, 3), (periodo(CANCELAMENTOS_V),), moeda("Valor cancelado")),
+    _p("Itens cancelados",
        'SELECT coalesce(sum(qtd_produtos), 0) AS "Itens cancelados" FROM painel_cancelamentos WHERE {{data}}',
-       "scalar", (0, 12, 12, 3)),
-    _p("Cancelamentos por motivo", CANCELAMENTOS, "painel_cancelamentos",
+       "scalar", _pos(CANCELAMENTOS, 0, 12, 12, 3), (periodo(CANCELAMENTOS_V),)),
+    _p("Cancelamentos por hora",
+       f'SELECT horas.hora AS "Hora", sum(valor_produto) AS "Valor cancelado" FROM {HORAS} '
+       "LEFT JOIN painel_cancelamentos ON painel_cancelamentos.hora = horas.hora AND {{data}} "
+       "GROUP BY 1 ORDER BY 1",
+       "line", _pos(CANCELAMENTOS, 3, 0, 24, 7), (periodo(CANCELAMENTOS_V),),
+       # Horas sem cancelamento ficam vazias e a linha liga os pontos (imagem 5).
+       {**eixos("Hora", "Valor cancelado"), "graph.x_axis.scale": "ordinal",
+        "series_settings": {"Valor cancelado": {"line.missing": "interpolate", "line.marker_enabled": True}},
+        **moeda("Valor cancelado")}),
+    _p("Cancelamentos por motivo",
        'SELECT motivo_cancelamento AS "Motivo", sum(valor_produto) AS "Valor" '
        "FROM painel_cancelamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (3, 0, 12, 7), {**eixos("Motivo", "Valor"), **moeda("Valor")}),
-    _p("Cancelamentos por operador", CANCELAMENTOS, "painel_cancelamentos",
+       "bar", _pos(CANCELAMENTOS, 10, 0, 12, 8), (periodo(CANCELAMENTOS_V),),
+       {**eixos("Motivo", "Valor"), **moeda("Valor")}),
+    _p("Cancelamentos por operador",
        'SELECT operador_cancelamento AS "Operador", sum(valor_produto) AS "Valor" '
        "FROM painel_cancelamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (3, 12, 12, 7), {**eixos("Operador", "Valor"), **moeda("Valor")}),
-    _p("Últimos cancelamentos", CANCELAMENTOS, "painel_cancelamentos",
+       "pie", _pos(CANCELAMENTOS, 10, 12, 12, 8), (periodo(CANCELAMENTOS_V),),
+       {"pie.dimension": "Operador", "pie.metric": "Valor", **moeda("Valor")}),
+    _p("Últimos cancelamentos",
        'SELECT data_hora_cancelamento AS "Quando", produto AS "Produto", qtd_produtos AS "Qtd", '
        'valor_produto AS "Valor", motivo_cancelamento AS "Motivo", '
        'operador_cancelamento AS "Cancelado por", tipo_cancelamento AS "Tipo" '
        "FROM painel_cancelamentos WHERE {{data}} ORDER BY 1 DESC LIMIT 100",
-       "table", (10, 0, 24, 6), moeda("Valor")),
-    _p("Faturamento por operador de caixa", CANCELAMENTOS, "painel_vendas",
-       'SELECT operador AS "Operador", sum(valor_faturamento) AS "Faturamento", count(*) AS "Vendas" '
-       "FROM painel_vendas WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", (16, 0, 12, 7), {**eixos("Operador", "Faturamento"), **moeda("Faturamento")}),
-    _p("Vendas por atendente", CANCELAMENTOS, "painel_produtos",
-       'SELECT coalesce(atendente, \'Sem atendente\') AS "Atendente", sum(valor_produto) AS "Valor" '
-       "FROM painel_produtos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "row", (16, 12, 12, 7), {**eixos("Atendente", "Valor"), **moeda("Valor")}),
+       "table", _pos(CANCELAMENTOS, 18, 0, 24, 7), (periodo(CANCELAMENTOS_V),), moeda("Valor")),
 )
 
 
@@ -385,7 +550,28 @@ def itens_da_colecao(cliente: ClienteMetabase, colecao_id: int, modelo: str) -> 
     return {item["name"]: item["id"] for item in itens if item.get("model") == modelo}
 
 
-def corpo_da_pergunta(pergunta: Pergunta, banco_id: int, campo_data: int, colecao_id: int) -> dict[str, Any]:
+def corpo_da_pergunta(pergunta: Pergunta, banco_id: int, campos: dict[str, int], colecao_id: int) -> dict[str, Any]:
+    """`campos`: id no Metabase da coluna `data` de cada view (ver aguardar_sincronizacao)."""
+    tags = {}
+    for filtro in pergunta.filtros:
+        parametro = PARAMETROS[filtro.parametro]
+        tag = {
+            # id estável: rodar de novo não troca a ligação com o filtro.
+            "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"swfast/{pergunta.nome}/{filtro.tag}")),
+            "name": filtro.tag,
+            "display-name": parametro["name"],
+        }
+        if filtro.view is not None:
+            tag |= {
+                "type": "dimension",
+                "dimension": ["field", campos[filtro.view], None],
+                "widget-type": "date/all-options",
+            }
+        else:
+            # Variável de texto com o mesmo padrão do filtro: a pergunta
+            # aberta sozinha (fora do dashboard) também funciona.
+            tag |= {"type": "text", "default": parametro["default"][0], "required": True}
+        tags[filtro.tag] = tag
     return {
         "name": pergunta.nome,
         "collection_id": colecao_id,
@@ -394,22 +580,25 @@ def corpo_da_pergunta(pergunta: Pergunta, banco_id: int, campo_data: int, coleca
         "dataset_query": {
             "database": banco_id,
             "type": "native",
-            "native": {
-                "query": pergunta.sql,
-                "template-tags": {
-                    "data": {
-                        # id estável: rodar de novo não troca a ligação com o filtro.
-                        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"swfast/{pergunta.nome}")),
-                        "name": "data",
-                        "display-name": "Período",
-                        "type": "dimension",
-                        "dimension": ["field", campo_data, None],
-                        "widget-type": "date/all-options",
-                    }
-                },
-            },
+            "native": {"query": pergunta.sql, "template-tags": tags},
         },
     }
+
+
+def ligacoes_dos_filtros(pergunta: Pergunta, card_id: int) -> list[dict[str, Any]]:
+    """Os `parameter_mappings` de um cartão: só os filtros que a pergunta usa."""
+    return [
+        {
+            "parameter_id": filtro.parametro,
+            "card_id": card_id,
+            "target": (
+                ["dimension", ["template-tag", filtro.tag]]
+                if filtro.view is not None
+                else ["variable", ["template-tag", filtro.tag]]
+            ),
+        }
+        for filtro in pergunta.filtros
+    ]
 
 
 def montar_dashboard(cliente: ClienteMetabase, banco_id: int, campos: dict[str, int], colecao_id: int) -> int:
@@ -417,11 +606,17 @@ def montar_dashboard(cliente: ClienteMetabase, banco_id: int, campos: dict[str, 
     existentes = itens_da_colecao(cliente, colecao_id, "card")
     ids: dict[str, int] = {}
     for pergunta in PERGUNTAS:
-        corpo = corpo_da_pergunta(pergunta, banco_id, campos[pergunta.view], colecao_id)
+        corpo = corpo_da_pergunta(pergunta, banco_id, campos, colecao_id)
         if pergunta.nome in existentes:
             ids[pergunta.nome] = cliente.put(f"/card/{existentes[pergunta.nome]}", corpo)["id"]
         else:
             ids[pergunta.nome] = cliente.post("/card", corpo)["id"]
+
+    # Perguntas que saíram do código (ex.: "Itens em promoção") vão para a lixeira.
+    for nome, card_id in existentes.items():
+        if nome not in ids:
+            cliente.put(f"/card/{card_id}", {"archived": True})
+            logger.info("Pergunta '%s' arquivada (não está mais no dashboard).", nome)
 
     dashboards = itens_da_colecao(cliente, colecao_id, "dashboard")
     if NOME_DASHBOARD in dashboards:
@@ -435,31 +630,29 @@ def montar_dashboard(cliente: ClienteMetabase, banco_id: int, campos: dict[str, 
     abas = [{"id": atuais.get(nome, -indice), "name": nome} for indice, nome in enumerate(ABAS, start=1)]
     id_da_aba = {aba["name"]: aba["id"] for aba in abas}
 
-    cartoes = [
-        {
-            "id": -indice,  # sempre novos: o dashboard é redesenhado inteiro a cada instalação
-            "card_id": ids[pergunta.nome],
-            "dashboard_tab_id": id_da_aba[pergunta.aba],
-            "row": pergunta.linha,
-            "col": pergunta.coluna,
-            "size_x": pergunta.largura,
-            "size_y": pergunta.altura,
-            "parameter_mappings": [{
-                "parameter_id": PARAMETRO_PERIODO["id"],
+    cartoes = []
+    for pergunta in PERGUNTAS:
+        for posicao in pergunta.posicoes:
+            cartoes.append({
+                "id": -(len(cartoes) + 1),  # sempre novos: o dashboard é redesenhado inteiro
                 "card_id": ids[pergunta.nome],
-                "target": ["dimension", ["template-tag", "data"]],
-            }],
-            "visualization_settings": {},
-        }
-        for indice, pergunta in enumerate(PERGUNTAS, start=1)
-    ]
+                "dashboard_tab_id": id_da_aba[posicao.aba],
+                "row": posicao.linha,
+                "col": posicao.coluna,
+                "size_x": posicao.largura,
+                "size_y": posicao.altura,
+                "parameter_mappings": ligacoes_dos_filtros(pergunta, ids[pergunta.nome]),
+                "visualization_settings": {},
+            })
+
+    usados = {filtro.parametro for pergunta in PERGUNTAS for filtro in pergunta.filtros}
     cliente.put(f"/dashboard/{dashboard_id}", {
         "name": NOME_DASHBOARD,
-        "parameters": [PARAMETRO_PERIODO],
+        "parameters": [parametro for chave, parametro in PARAMETROS.items() if chave in usados],
         "tabs": abas,
         "dashcards": cartoes,
     })
-    logger.info("Dashboard com %d perguntas em %d abas.", len(PERGUNTAS), len(ABAS))
+    logger.info("Dashboard com %d perguntas (%d cartões) em %d abas.", len(PERGUNTAS), len(cartoes), len(ABAS))
     return dashboard_id
 
 

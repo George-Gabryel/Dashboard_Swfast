@@ -235,3 +235,69 @@ def test_views_sobrevivem_a_criar_tabelas_de_novo(banco):
     carregar(banco, venda("V1"))
     banco.criar_tabelas()
     assert consultar(banco, "SELECT count(*) FROM painel_vendas") == [(1,)]
+
+
+def test_painel_vendas_separa_bruto_desconto_e_liquido(banco):
+    # Como a API manda: o faturamento já vem sem convênio e sem cortesia.
+    carregar(banco, venda(
+        "V1", valorProdutos=200.0, valorTaxaServicos=20.0, valorDescontos=10.0,
+        valorCortesias=30.0, valorFaturamento=180.0,
+    ))
+    assert consultar(
+        banco, "SELECT valor_bruto, valor_desconto_total, valor_liquido FROM painel_vendas"
+    ) == [(220.0, 40.0, 180.0)]
+
+
+def test_painel_calendario_cobre_hoje_e_o_proximo_ano(banco):
+    assert consultar(
+        banco,
+        "SELECT bool_or(data = current_date), max(data) >= current_date + 365, min(data) FROM painel_calendario",
+    ) == [(True, True, date(2020, 1, 1))]
+
+
+def test_cancelamento_total_usa_a_hora_da_venda_e_item_a_hora_do_item(banco):
+    carregar(banco, {
+        "id": "C1", "tipoCancelamento": "Total", "dataHoraCancelamento": "2026-10-17T22:10:00",
+        "produtos": [{"id": "PT", "tipoCancelamento": "Total", "dataHoraCancelamento": "2026-10-17T14:00:00"}],
+    }, {
+        "id": "C2", "tipoCancelamento": "Item", "dataHoraCancelamento": "2026-10-18T09:00:00",
+        "produtos": [{"id": "PI", "tipoCancelamento": "Item", "dataHoraCancelamento": "2026-10-18T23:45:00"}],
+    }, fonte="cancelamentos")
+    assert consultar(banco, "SELECT id, data, hora FROM painel_cancelamentos ORDER BY id") == [
+        ("PI", date(2026, 10, 18), 23),  # Item: hora do item
+        ("PT", date(2026, 10, 17), 22),  # Total: hora da venda cancelada
+    ]
+
+
+def sql_do_kpi(nome: str, inicio: str, fim: str) -> str:
+    """O SQL de um bloco comparado com o filtro Período já expandido, como o Metabase faz."""
+    from swfast.metabase import PERGUNTAS
+
+    pergunta = next(p for p in PERGUNTAS if p.nome == nome)
+    return pergunta.sql.replace(
+        "{{data}}", f"\"public\".\"painel_calendario\".\"data\" BETWEEN date '{inicio}' AND date '{fim}'"
+    )
+
+
+@pytest.mark.parametrize("inicio, fim, anterior", [
+    ("2026-10-01", "2026-10-31", date(2026, 9, 1)),   # Este mês → setembro inteiro
+    ("2026-09-01", "2026-09-30", date(2026, 8, 1)),   # Mês passado → agosto
+    ("2026-10-23", "2026-10-29", date(2026, 10, 16)),  # Últimos 7 dias → os 7 anteriores
+    ("2026-10-25", "2026-10-31", date(2026, 10, 18)),  # Esta semana → semana passada
+])
+def test_kpi_compara_com_o_periodo_anterior_certo(banco, inicio, fim, anterior):
+    linhas = consultar(banco, sql_do_kpi("Faturamento bruto", inicio, fim))
+    assert [linha[0] for linha in linhas] == [anterior, date.fromisoformat(inicio)]
+
+
+def test_kpi_soma_cada_periodo_separado(banco):
+    carregar(
+        banco,
+        venda("SET", data="2026-09-30T00:00:00", valorProdutos=100.0, valorTaxaServicos=0.0, valorFaturamento=100.0),
+        venda("OUT", data="2026-10-01T00:00:00", valorProdutos=150.0, valorTaxaServicos=0.0, valorFaturamento=150.0),
+        venda("AGO", data="2026-08-31T00:00:00", valorProdutos=999.0, valorTaxaServicos=0.0, valorFaturamento=999.0),
+    )
+    # Outubro inteiro contra setembro inteiro: 31/08 fica de fora.
+    assert consultar(banco, sql_do_kpi("Faturamento bruto", "2026-10-01", "2026-10-31")) == [
+        (date(2026, 9, 1), 100.0), (date(2026, 10, 1), 150.0),
+    ]

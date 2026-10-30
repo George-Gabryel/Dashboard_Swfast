@@ -5,14 +5,14 @@ Rodar: pytest -q
 
 from __future__ import annotations
 
-from datetime import date
+import re
 
 import pytest
 import requests
 
 from swfast import metabase
 from swfast.config import Configuracao, ConfiguracaoMetabase
-from swfast.metabase import ABAS, PERGUNTAS, ClienteMetabase
+from swfast.metabase import ABAS, PARAMETROS, PERGUNTAS, ClienteMetabase
 from swfast.visoes import VISOES
 
 MB = ConfiguracaoMetabase(
@@ -100,47 +100,96 @@ def test_metabase_ja_configurado_faz_login():
     assert cliente.sessao.headers["X-Metabase-Session"] == "sessao-login"
 
 
-def test_monta_o_dashboard_com_abas_filtro_e_todas_as_perguntas():
-    cliente = MetabaseFalso()
+def montar(cliente: MetabaseFalso) -> dict:
     campos = metabase.aguardar_sincronizacao(cliente, 7)
     metabase.montar_dashboard(cliente, 7, campos, 3)
+    return cliente.dashboard
 
-    painel = cliente.dashboard
+
+def test_monta_o_dashboard_com_abas_filtros_e_todas_as_perguntas():
+    painel = montar(MetabaseFalso())
+
     assert [aba["name"] for aba in painel["tabs"]] == list(ABAS)
-    assert painel["parameters"][0]["default"] == "past30days"
-    assert len(painel["dashcards"]) == len(PERGUNTAS)
-    assert all(c["parameter_mappings"][0]["parameter_id"] == "periodo" for c in painel["dashcards"])
+    assert {parametro["id"] for parametro in painel["parameters"]} == {"periodo", "dias", "metrica"}
+    assert sum(len(pergunta.posicoes) for pergunta in PERGUNTAS) == len(painel["dashcards"])
+    # Cada cartão só liga os filtros que a sua pergunta usa.
+    for cartao in painel["dashcards"]:
+        assert {m["parameter_id"] for m in cartao["parameter_mappings"]} <= set(PARAMETROS)
     # Cada aba recebe pelo menos uma pergunta.
     assert {c["dashboard_tab_id"] for c in painel["dashcards"]} == {aba["id"] for aba in painel["tabs"]}
 
 
-def test_reinstalar_atualiza_sem_duplicar():
+def test_desconto_aparece_em_duas_abas_com_um_card_so():
+    cliente = MetabaseFalso()
+    painel = montar(cliente)
+    card = cliente.cards["Desconto"]
+    abas = {c["dashboard_tab_id"] for c in painel["dashcards"] if c["card_id"] == card}
+    nomes = {aba["name"] for aba in painel["tabs"] if aba["id"] in abas}
+    assert nomes == {"Faturamento", "Pagamentos e descontos"}
+
+
+def test_filtro_exibir_liga_como_variavel_de_texto():
+    cliente = MetabaseFalso()
+    painel = montar(cliente)
+    top10 = cliente.cards["Top 10 produtos"]
+    ligacoes = next(c["parameter_mappings"] for c in painel["dashcards"] if c["card_id"] == top10)
+    assert {"parameter_id": "metrica", "card_id": top10,
+            "target": ["variable", ["template-tag", "metrica"]]} in ligacoes
+
+    pergunta = next(p for p in PERGUNTAS if p.nome == "Top 10 produtos")
+    campos = {nome: 800 + i for i, nome in enumerate(VISOES)}
+    tag = metabase.corpo_da_pergunta(pergunta, 7, campos, 3)["dataset_query"]["native"]["template-tags"]["metrica"]
+    assert tag["type"] == "text" and tag["default"] == "Valor (R$)"
+
+
+def test_reinstalar_atualiza_sem_duplicar_e_arquiva_o_que_saiu():
     cliente = MetabaseFalso(configurado=True, ja_instalado=True)
-    campos = metabase.aguardar_sincronizacao(cliente, 7)
-    metabase.montar_dashboard(cliente, 7, campos, 3)
+    cliente.cards["Itens em promoção"] = 999
+    montar(cliente)
 
     assert ("POST", "/card") not in cliente.chamadas
     assert ("POST", "/dashboard") not in cliente.chamadas
-    assert sum(1 for metodo, caminho in cliente.chamadas if metodo == "PUT" and caminho.startswith("/card/")) == len(PERGUNTAS)
+    assert ("PUT", "/card/999") in cliente.chamadas  # arquivada
     # As abas existentes mantêm o id.
     assert [aba["id"] for aba in cliente.dashboard["tabs"]] == [50, 51, 52, 53]
 
 
-def test_perguntas_tem_filtro_de_periodo_na_view_certa():
-    corpo = metabase.corpo_da_pergunta(PERGUNTAS[0], banco_id=7, campo_data=801, colecao_id=3)
-    tag = corpo["dataset_query"]["native"]["template-tags"]["data"]
-    assert tag["dimension"] == ["field", 801, None]
-    assert "{{data}}" in corpo["dataset_query"]["native"]["query"]
-    # O id da tag é estável entre execuções.
-    assert tag["id"] == metabase.corpo_da_pergunta(PERGUNTAS[0], 7, 801, 3)["dataset_query"]["native"]["template-tags"]["data"]["id"]
+def test_kpi_comparado_usa_o_calendario_e_devolve_duas_linhas():
+    pergunta = next(p for p in PERGUNTAS if p.nome == "Faturamento bruto")
+    assert pergunta.display == "smartscalar"
+    assert "FROM painel_calendario WHERE {{data}}" in pergunta.sql and "UNION ALL" in pergunta.sql
+    assert pergunta.filtros[0].view == "painel_calendario"
+    desconto = next(p for p in PERGUNTAS if p.nome == "Desconto")
+    assert desconto.ajustes["scalar.switch_positive_negative"] is True
 
 
-def test_toda_pergunta_usa_uma_view_existente_e_o_filtro():
+def test_tag_de_data_aponta_para_a_view_certa_com_id_estavel():
+    pergunta = next(p for p in PERGUNTAS if p.nome == "Vendas")
+    campos = {nome: 800 + i for i, nome in enumerate(VISOES)}
+    tag = metabase.corpo_da_pergunta(pergunta, 7, campos, 3)["dataset_query"]["native"]["template-tags"]["data"]
+    assert tag["dimension"] == ["field", campos["painel_vendas"], None]
+    assert tag["id"] == metabase.corpo_da_pergunta(pergunta, 7, campos, 3)["dataset_query"]["native"]["template-tags"]["data"]["id"]
+
+
+def test_toda_pergunta_usa_so_filtros_declarados():
     for pergunta in PERGUNTAS:
-        assert pergunta.view in VISOES, pergunta.nome
-        assert pergunta.view in pergunta.sql and "{{data}}" in pergunta.sql, pergunta.nome
-        assert pergunta.coluna + pergunta.largura <= 24, pergunta.nome
+        tags_no_sql = set(re.findall(r"\{\{(\w+)\}\}", pergunta.sql))
+        assert tags_no_sql == {filtro.tag for filtro in pergunta.filtros}, pergunta.nome
+        for filtro in pergunta.filtros:
+            assert filtro.parametro in PARAMETROS, pergunta.nome
+            if filtro.view is not None:
+                assert filtro.view in VISOES and filtro.view in pergunta.sql, pergunta.nome
     assert len({pergunta.nome for pergunta in PERGUNTAS}) == len(PERGUNTAS)
+
+
+def test_layout_cabe_na_grade_e_nada_se_sobrepoe():
+    ocupado: dict[str, set[tuple[int, int]]] = {aba: set() for aba in ABAS}
+    for pergunta in PERGUNTAS:
+        for pos in pergunta.posicoes:
+            assert pos.aba in ABAS and pos.coluna + pos.largura <= 24, pergunta.nome
+            celulas = {(pos.linha + l, pos.coluna + c) for l in range(pos.altura) for c in range(pos.largura)}
+            assert not celulas & ocupado[pos.aba], f"{pergunta.nome} sobrepõe outro cartão em {pos.aba}"
+            ocupado[pos.aba] |= celulas
 
 
 def test_instalar_grava_o_link_publico(tmp_path, monkeypatch):
@@ -166,3 +215,18 @@ def test_sincronizacao_que_nao_termina_vira_erro(monkeypatch):
 
 def test_sem_argumento_mostra_o_uso():
     assert metabase.main([]) == 2
+
+
+def test_faturamento_por_hora_mostra_so_horas_com_venda():
+    pergunta = next(p for p in PERGUNTAS if p.nome == "Faturamento por hora")
+    assert "generate_series" not in pergunta.sql
+    assert pergunta.ajustes["graph.x_axis.scale"] == "ordinal"
+
+
+def test_pizzas_no_estilo_top5_com_outros_e_total():
+    for nome in ("Top 5 grupos", "Top 5 subgrupos"):
+        pergunta = next(p for p in PERGUNTAS if p.nome == nome)
+        assert "'OUTROS'" in pergunta.sql and "{{metrica}}" in pergunta.sql
+        assert pergunta.ajustes["pie.percent_visibility"] == "inside"
+        assert pergunta.ajustes["pie.show_total"] is True and pergunta.ajustes["pie.show_legend"] is True
+        assert "·" not in pergunta.sql  # nomes limpos na legenda

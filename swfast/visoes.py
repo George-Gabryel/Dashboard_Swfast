@@ -44,8 +44,23 @@ VISOES: dict[str, str] = {
             coalesce(v.valor_descontos, 0) AS valor_descontos,
             coalesce(v.valor_combos, 0) AS valor_combos,
             coalesce(v.valor_cortesias, 0) AS valor_cortesias,
-            coalesce(v.valor_faturamento, 0) AS valor_faturamento
+            coalesce(v.valor_faturamento, 0) AS valor_faturamento,
+            -- Bruto: produtos + taxas. Desconto: convênios + combos + cortesias.
+            -- Líquido = bruto - desconto, que é o valor_faturamento da API e
+            -- bate com a soma dos pagamentos.
+            coalesce(v.valor_produtos, 0) + coalesce(v.valor_taxa_servicos, 0)
+                + coalesce(v.valor_taxa_entregas, 0) + coalesce(v.valor_repiques, 0) AS valor_bruto,
+            coalesce(v.valor_descontos, 0) + coalesce(v.valor_combos, 0)
+                + coalesce(v.valor_cortesias, 0) AS valor_desconto_total,
+            coalesce(v.valor_faturamento, 0) AS valor_liquido
         FROM dados_venda v
+    """,
+    # Um dia por linha. O filtro "Período" do dashboard é aplicado aqui para o
+    # SQL saber o início e o fim escolhidos (até em "Últimos 30 dias") e
+    # calcular o período anterior de mesmo tamanho.
+    "painel_calendario": """
+        SELECT dia::date AS data
+        FROM generate_series(date '2020-01-01', current_date + 366, interval '1 day') AS dia
     """,
     "painel_produtos": f"""
         SELECT
@@ -114,22 +129,34 @@ VISOES: dict[str, str] = {
         FROM dados_acrescimo a
         JOIN dados_venda v ON v.id = a.id_venda
     """,
+    # Momento do cancelamento: cancelamento Total usa a data/hora da venda
+    # cancelada (dados_venda_cancelamento); cancelamento de Item usa a do
+    # próprio item. Se a fonte certa vier vazia, cai na outra.
     "painel_cancelamentos": """
         SELECT
-            p.id,
-            p.id_venda,
-            coalesce(p.data_hora_cancelamento, c.data_hora_cancelamento)::date AS data,
-            coalesce(p.data_hora_cancelamento, c.data_hora_cancelamento) AS data_hora_cancelamento,
-            coalesce(p.tipo_cancelamento, c.tipo_cancelamento) AS tipo_cancelamento,
-            coalesce(p.motivo_cancelamento, c.motivo_cancelamento, 'Sem motivo') AS motivo_cancelamento,
-            coalesce(p.operador_cancelamento, c.operador_cancelamento) AS operador_cancelamento,
-            c.operador AS operador_caixa,
-            p.atendente,
-            p.produto,
-            p.grupo,
-            coalesce(p.qtd_produtos, 0) AS qtd_produtos,
-            coalesce(p.valor_produto, 0) AS valor_produto
-        FROM dados_produto_cancelamento p
-        JOIN dados_venda_cancelamento c ON c.id = p.id_venda
+            x.*,
+            x.data_hora_cancelamento::date AS data,
+            extract(hour FROM x.data_hora_cancelamento)::int AS hora
+        FROM (
+            SELECT
+                p.id,
+                p.id_venda,
+                CASE
+                    WHEN lower(coalesce(p.tipo_cancelamento, c.tipo_cancelamento)) = 'total'
+                        THEN coalesce(c.data_hora_cancelamento, p.data_hora_cancelamento)
+                    ELSE coalesce(p.data_hora_cancelamento, c.data_hora_cancelamento)
+                END AS data_hora_cancelamento,
+                coalesce(p.tipo_cancelamento, c.tipo_cancelamento) AS tipo_cancelamento,
+                coalesce(p.motivo_cancelamento, c.motivo_cancelamento, 'Sem motivo') AS motivo_cancelamento,
+                coalesce(p.operador_cancelamento, c.operador_cancelamento) AS operador_cancelamento,
+                c.operador AS operador_caixa,
+                p.atendente,
+                p.produto,
+                p.grupo,
+                coalesce(p.qtd_produtos, 0) AS qtd_produtos,
+                coalesce(p.valor_produto, 0) AS valor_produto
+            FROM dados_produto_cancelamento p
+            JOIN dados_venda_cancelamento c ON c.id = p.id_venda
+        ) AS x
     """,
 }
