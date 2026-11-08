@@ -5,6 +5,7 @@ Rodar: pytest -q
 
 from __future__ import annotations
 
+import json
 import re
 
 import pytest
@@ -151,7 +152,16 @@ def test_reinstalar_atualiza_sem_duplicar_e_arquiva_o_que_saiu():
     assert ("POST", "/dashboard") not in cliente.chamadas
     assert ("PUT", "/card/999") in cliente.chamadas  # arquivada
     # As abas existentes mantêm o id.
-    assert [aba["id"] for aba in cliente.dashboard["tabs"]] == [50, 51, 52, 53]
+    assert [aba["id"] for aba in cliente.dashboard["tabs"]] == [50, 51, 52, 53, 54]
+
+
+def test_aba_nova_entra_sem_mexer_nas_existentes():
+    cliente = MetabaseFalso(configurado=True, ja_instalado=True)
+    cliente.dashboard["tabs"] = [aba for aba in cliente.dashboard["tabs"] if aba["name"] != "Detalhes"]
+    montar(cliente)
+    abas = {aba["name"]: aba["id"] for aba in cliente.dashboard["tabs"]}
+    assert [abas[nome] for nome in ABAS[:4]] == [50, 51, 52, 53]
+    assert abas["Detalhes"] < 0
 
 
 def test_kpi_comparado_usa_o_calendario_e_devolve_duas_linhas():
@@ -221,6 +231,48 @@ def test_faturamento_por_hora_mostra_so_horas_com_venda():
     pergunta = next(p for p in PERGUNTAS if p.nome == "Faturamento por hora")
     assert "generate_series" not in pergunta.sql
     assert pergunta.ajustes["graph.x_axis.scale"] == "ordinal"
+
+
+NUMEROS_DETALHADOS = (
+    "Vendas", "Pessoas atendidas", "Taxa de serviço", "Total de acréscimos", "Valor cancelado", "Itens cancelados",
+)
+
+
+def colunas_do_select(pergunta) -> set[str]:
+    return set(re.findall(r'AS "([^"]+)"', pergunta.sql))
+
+
+@pytest.mark.parametrize("nome", NUMEROS_DETALHADOS)
+def test_card_de_numero_baixa_as_linhas_do_periodo(nome):
+    pergunta = next(p for p in PERGUNTAS if p.nome == nome)
+    assert pergunta.display == "scalar"
+    total = pergunta.ajustes["scalar.field"]
+    # O total vem de um agregado com coalesce (0 sem dados) e as linhas por LEFT JOIN.
+    assert "coalesce(" in pergunta.sql and f'AS "{total}"' in pergunta.sql
+    assert "LEFT JOIN (SELECT" in pergunta.sql and "ON true" in pergunta.sql
+    assert len(colunas_do_select(pergunta)) > 2
+    for coluna in pergunta.ajustes.get("column_settings", {}):
+        assert json.loads(coluna)[1] in colunas_do_select(pergunta), nome
+
+
+def test_aba_detalhes_tem_tabelas_sem_limite():
+    detalhes = [p for p in PERGUNTAS if any(pos.aba == "Detalhes" for pos in p.posicoes)]
+    assert len(detalhes) == 6
+    for pergunta in detalhes:
+        assert pergunta.display == "table" and "LIMIT" not in pergunta.sql, pergunta.nome
+        for coluna in pergunta.ajustes.get("column_settings", {}):
+            assert json.loads(coluna)[1] in colunas_do_select(pergunta), pergunta.nome
+
+
+def test_ultimos_cancelamentos_continua_com_limite_de_100():
+    pergunta = next(p for p in PERGUNTAS if p.nome == "Últimos cancelamentos")
+    assert pergunta.sql.endswith("LIMIT 100")
+
+
+def test_pagamentos_por_tipo_tem_a_legenda_abaixo_da_rosca():
+    # Regra do Metabase (ChartWithLegend): legenda embaixo só se largura <= 3/4 da altura.
+    pos = next(p for p in PERGUNTAS if p.nome == "Pagamentos por tipo").posicoes[0]
+    assert pos.largura <= pos.altura * 3 / 4 and pos.altura > 3 and pos.largura > 2
 
 
 def test_pizzas_no_estilo_top5_com_outros_e_total():

@@ -153,7 +153,7 @@ Rodado com `docker compose run --rm instalar-dashboard`, faz tudo pela API do Me
 2. espera o Metabase responder;
 3. cria o administrador (ou entra com ele, se já existe);
 4. conecta o banco `swfast` usando o usuário de leitura;
-5. monta o dashboard **"Swfast — Vendas"**, com 4 abas (Faturamento, Produtos, Pagamentos e descontos, Cancelamentos) e filtro de período;
+5. monta o dashboard **"Swfast — Vendas"**, com 5 abas (Faturamento, Produtos, Pagamentos e descontos, Cancelamentos, Detalhes) e filtro de período;
 6. liga o link público e grava em `data/dashboard_url.txt`.
 
 Pode ser executado várias vezes: atualiza as perguntas no lugar, sem duplicar nada, e o link público continua o mesmo.
@@ -362,6 +362,20 @@ Os três containers usam `restart: unless-stopped`, ou seja, voltam sozinhos **s
 | Atualizar o dashboard          | `docker compose run --rm instalar-dashboard` (depois de mudar `visoes.py` ou `metabase.py`) |
 | Editar o dashboard à mão       | `http://127.0.0.1:3000` com o login de `.env.meta`                       |
 | Parar o ETL                    | `docker compose stop` (o dashboard continua funcionando)                 |
+
+### Exportar para Excel
+
+O próprio dashboard exporta. Escolha o **Período**, passe o mouse sobre o card, clique no ícone de download (ou no menu **…**) e escolha **.xlsx**. A planilha sempre respeita o período selecionado e vai para a pasta **Downloads** do usuário.
+
+| Card                                                                 | O que vem na planilha                                         |
+|----------------------------------------------------------------------|---------------------------------------------------------------|
+| Números simples (Vendas, Pessoas atendidas, Taxa de serviço, Total de acréscimos, Valor cancelado, Itens cancelados) | As **linhas detalhadas** do período (ex.: uma linha por venda), com uma última coluna que repete o total mostrado no card |
+| Blocos com % de comparação e gráficos                                | O que o card mostra: os números agregados                     |
+| Aba **Detalhes**                                                     | Tudo linha a linha: vendas, itens vendidos, pagamentos, descontos, acréscimos e cancelamentos |
+
+Na tela, as tabelas da aba Detalhes mostram até 2.000 linhas, mas o arquivo baixado traz todas as linhas do período. "Últimos cancelamentos" é limitado às 100 mais recentes de propósito; a lista completa sai no card "Valor cancelado" ou em "Cancelamentos detalhados".
+
+Os cards de número buscam as linhas do período para mostrar o total, e é isso que permite baixar o detalhe. Para isso eles usam `numero_detalhado` em `swfast/metabase.py`.
 
 ### Opções do `main.py`
 

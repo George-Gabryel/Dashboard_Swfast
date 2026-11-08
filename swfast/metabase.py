@@ -10,9 +10,14 @@ O que faz, em ordem, e pode rodar quantas vezes quiser sem duplicar nada:
 2. Espera o Metabase responder.
 3. Primeira vez: cria o administrador. Depois: entra com ele.
 4. Liga o compartilhamento público e conecta o banco swfast.
-5. Monta o dashboard "Swfast — Vendas": 4 abas, filtro de período, perguntas
+5. Monta o dashboard "Swfast — Vendas": 5 abas, filtro de período, perguntas
    em SQL sobre as views `painel_*` (`visoes.py`). Se ele já existe, as
    perguntas são atualizadas no lugar e o link público continua o mesmo.
+
+Exportar para Excel: é o "Baixar resultados" nativo de cada card do link
+público. Cards de número baixam as linhas detalhadas do período (ver
+`numero_detalhado`); gráficos baixam o que mostram; a aba Detalhes tem as
+tabelas linha a linha.
 6. Grava o link público em data/dashboard_url.txt — é o que o atalho abre.
 """
 
@@ -42,8 +47,8 @@ NOME_COLECAO = "Swfast"
 NOME_DASHBOARD = "Swfast — Vendas"
 ARQUIVO_URL = "dashboard_url.txt"
 
-ABAS = ("Faturamento", "Produtos", "Pagamentos e descontos", "Cancelamentos")
-FATURAMENTO, PRODUTOS, PAGAMENTOS, CANCELAMENTOS = ABAS
+ABAS = ("Faturamento", "Produtos", "Pagamentos e descontos", "Cancelamentos", "Detalhes")
+FATURAMENTO, PRODUTOS, PAGAMENTOS, CANCELAMENTOS, DETALHES = ABAS
 
 # Filtros do dashboard. Cada pergunta diz quais usa (ver `Filtro`).
 QUANTIDADE, VALOR = "Quantidade", "Valor (R$)"
@@ -261,6 +266,85 @@ VENDAS, PRODUTOS_V, PAGAMENTOS_V = "painel_vendas", "painel_produtos", "painel_p
 DESCONTOS_V, ACRESCIMOS_V, CANCELAMENTOS_V = "painel_descontos", "painel_acrescimos", "painel_cancelamentos"
 
 
+@dataclass(frozen=True)
+class Detalhe:
+    """As linhas de uma view como saem na planilha: colunas com nome amigável.
+
+    `colunas`: pares (coluna da view, nome na planilha). `ordem`: o ORDER BY,
+    pelos nomes da planilha. `em_reais`: colunas formatadas como R$ (o XLSX
+    do Metabase já sai com formato de moeda).
+    """
+
+    view: str
+    colunas: tuple[tuple[str, str], ...]
+    ordem: str
+    em_reais: tuple[str, ...]
+
+    @property
+    def select(self) -> str:
+        return ", ".join(f'{coluna} AS "{nome}"' for coluna, nome in self.colunas)
+
+
+DETALHE_VENDA = Detalhe(VENDAS, (
+    ("id", "Venda"), ("data", "Data"), ("data_hora_transacao", "Data/hora"), ("loja", "Loja"),
+    ("setor", "Setor"), ("operador", "Operador"), ("nr_mesa", "Mesa"), ("qtd_pessoas", "Pessoas"),
+    ("qtd_produtos", "Itens"), ("valor_produtos", "Valor dos produtos"),
+    ("valor_taxa_servicos", "Taxa de serviço"), ("valor_taxa_entregas", "Taxa de entrega"),
+    ("valor_repiques", "Repiques"), ("valor_desconto_total", "Desconto"),
+    ("valor_bruto", "Valor bruto"), ("valor_liquido", "Valor líquido"),
+), '"Data/hora", "Venda"', ("Valor dos produtos", "Taxa de serviço", "Taxa de entrega", "Repiques",
+                            "Desconto", "Valor bruto", "Valor líquido"))
+DETALHE_ITEM = Detalhe(PRODUTOS_V, (
+    ("id_venda", "Venda"), ("data", "Data"), ("hora", "Hora"), ("operador", "Operador"),
+    ("atendente", "Atendente"), ("codigo_produto", "Código"), ("produto", "Produto"), ("grupo", "Grupo"),
+    ("sub_grupo", "Subgrupo"), ("promocao", "Promoção"), ("qtd_produtos", "Qtd"), ("valor_produto", "Valor"),
+), '"Data", "Hora", "Venda"', ("Valor",))
+DETALHE_PAGAMENTO = Detalhe(PAGAMENTOS_V, (
+    ("id_venda", "Venda"), ("data", "Data"), ("forma_pagamento", "Forma de pagamento"),
+    ("tipo_pagamento", "Tipo"), ("bandeira", "Bandeira"), ("valor_pagamento", "Valor"),
+), '"Data", "Venda"', ("Valor",))
+DETALHE_DESCONTO = Detalhe(DESCONTOS_V, (
+    ("id_venda", "Venda"), ("data", "Data"), ("tipo_desconto", "Tipo"), ("desconto", "Desconto"),
+    ("motivo", "Motivo"), ("operador_desconto", "Operador"), ("qtd_descontos", "Qtd"), ("valor_desconto", "Valor"),
+), '"Data", "Venda"', ("Valor",))
+DETALHE_ACRESCIMO = Detalhe(ACRESCIMOS_V, (
+    ("id_venda", "Venda"), ("data", "Data"), ("tipo_taxa", "Tipo"), ("operador_taxa", "Operador"),
+    ("valor_taxa", "Valor"),
+), '"Data", "Venda"', ("Valor",))
+DETALHE_CANCELAMENTO = Detalhe(CANCELAMENTOS_V, (
+    ("data_hora_cancelamento", "Quando"), ("id_venda", "Venda"), ("produto", "Produto"), ("grupo", "Grupo"),
+    ("qtd_produtos", "Qtd"), ("valor_produto", "Valor"), ("motivo_cancelamento", "Motivo"),
+    ("tipo_cancelamento", "Tipo"), ("operador_cancelamento", "Cancelado por"),
+    ("operador_caixa", "Operador do caixa"), ("atendente", "Atendente"),
+), '"Quando", "Venda"', ("Valor",))
+
+
+def numero_detalhado(nome: str, agregado: str, total: str, detalhe: Detalhe, posicao: Posicao,
+                     em_reais: bool = False) -> Pergunta:
+    """Card de número que, no "Baixar resultados", entrega as linhas do período.
+
+    O SQL devolve as linhas de `detalhe` e, em cada uma, a coluna `total` com
+    o agregado do período inteiro; o card mostra essa coluna (`scalar.field`),
+    então o número é o mesmo seja qual for a linha que o Metabase lê. O LEFT
+    JOIN garante uma linha mesmo sem dados: o card mostra 0, não fica vazio.
+    """
+    view = detalhe.view
+    consulta = f"""
+        SELECT linhas.*, totais."{total}"
+        FROM (SELECT coalesce({agregado}, 0) AS "{total}" FROM {view} WHERE {{{{data}}}}) AS totais
+        LEFT JOIN (SELECT {detalhe.select} FROM {view} WHERE {{{{data}}}}) AS linhas ON true
+        ORDER BY {detalhe.ordem}
+    """
+    reais = (*detalhe.em_reais, total) if em_reais else detalhe.em_reais
+    return _p(nome, consulta, "scalar", posicao, (periodo(view),), {"scalar.field": total, **moeda(*reais)})
+
+
+def tabela_detalhada(nome: str, detalhe: Detalhe, posicao: Posicao) -> Pergunta:
+    """Tabela da aba Detalhes: todas as linhas do período, sem LIMIT."""
+    consulta = f"SELECT {detalhe.select} FROM {detalhe.view} WHERE {{{{data}}}} ORDER BY {detalhe.ordem}"
+    return _p(nome, consulta, "table", posicao, (periodo(detalhe.view),), moeda(*detalhe.em_reais))
+
+
 def _pos(aba, linha, coluna, largura, altura) -> Posicao:
     return Posicao(aba, linha, coluna, largura, altura)
 
@@ -277,13 +361,13 @@ PERGUNTAS: tuple[Pergunta, ...] = (
     kpi_comparado(
         "Ticket médio", "sum(valor_liquido) / nullif(sum(qtd_pessoas), 0)", VENDAS, _pos(FATURAMENTO, 0, 18, 6, 4),
     ),
-    _p("Vendas", 'SELECT count(*) AS "Vendas" FROM painel_vendas WHERE {{data}}',
-       "scalar", _pos(FATURAMENTO, 4, 0, 8, 3), (periodo(VENDAS),)),
-    _p("Pessoas atendidas", 'SELECT sum(qtd_pessoas) AS "Pessoas" FROM painel_vendas WHERE {{data}}',
-       "scalar", _pos(FATURAMENTO, 4, 8, 8, 3), (periodo(VENDAS),)),
-    _p("Taxa de serviço",
-       'SELECT sum(valor_taxa_servicos) AS "Taxa de serviço" FROM painel_vendas WHERE {{data}}',
-       "scalar", _pos(FATURAMENTO, 4, 16, 8, 3), (periodo(VENDAS),), moeda("Taxa de serviço")),
+    # Cards de número: mostram o total e baixam as vendas do período (numero_detalhado).
+    numero_detalhado("Vendas", "count(*)", "Total de vendas no período", DETALHE_VENDA,
+                     _pos(FATURAMENTO, 4, 0, 8, 3)),
+    numero_detalhado("Pessoas atendidas", "sum(qtd_pessoas)", "Total de pessoas no período", DETALHE_VENDA,
+                     _pos(FATURAMENTO, 4, 8, 8, 3)),
+    numero_detalhado("Taxa de serviço", "sum(valor_taxa_servicos)", "Total de taxa de serviço no período",
+                     DETALHE_VENDA, _pos(FATURAMENTO, 4, 16, 8, 3), em_reais=True),
     # Só as horas que tiveram venda; o eixo pula as outras (ex.: 0, 13, 14...).
     _p("Faturamento por hora",
        'SELECT hora AS "Hora", sum(valor_liquido) AS "Faturamento", count(*) AS "Vendas" '
@@ -325,19 +409,21 @@ PERGUNTAS: tuple[Pergunta, ...] = (
     pizza_top5("Top 5 grupos", "grupo", "Grupo", _pos(PRODUTOS, 13, 0, 12, 9)),
     pizza_top5("Top 5 subgrupos", "sub_grupo", "Subgrupo", _pos(PRODUTOS, 13, 12, 12, 9)),
     # -- Pagamentos e descontos (o bloco Desconto vem da aba Faturamento) -------
-    _p("Total de acréscimos",
-       'SELECT coalesce(sum(valor_taxa), 0) AS "Acréscimos" FROM painel_acrescimos WHERE {{data}}',
-       "scalar", _pos(PAGAMENTOS, 0, 12, 12, 4), (periodo(ACRESCIMOS_V),), moeda("Acréscimos")),
+    numero_detalhado("Total de acréscimos", "sum(valor_taxa)", "Total de acréscimos no período",
+                     DETALHE_ACRESCIMO, _pos(PAGAMENTOS, 0, 12, 12, 4), em_reais=True),
     _p("Faturamento por forma de pagamento",
-       'SELECT forma_pagamento AS "Forma de pagamento", sum(valor_pagamento) AS "Faturamento", '
-       'count(DISTINCT id_venda) AS "Vendas" FROM painel_pagamentos WHERE {{data}} '
+       'SELECT forma_pagamento AS "Forma de pagamento", sum(valor_pagamento) AS "Faturamento" '
+       "FROM painel_pagamentos WHERE {{data}} "
        "GROUP BY 1 ORDER BY 2 DESC LIMIT 5",
-       "combo", _pos(PAGAMENTOS, 4, 0, 16, 8), (periodo(PAGAMENTOS_V),),
-       {**combo("Forma de pagamento", "Faturamento", "Vendas", valores_nas_barras=True), **moeda("Faturamento")}),
+       "bar", _pos(PAGAMENTOS, 4, 0, 16, 11), (periodo(PAGAMENTOS_V),),
+       {**eixos("Forma de pagamento", "Faturamento"), "graph.show_values": True, **moeda("Faturamento")}),
+    # Legenda abaixo da rosca: o Metabase não tem ajuste para isso, ele põe a
+    # legenda embaixo quando o card é alto (largura <= 3/4 da altura) e ao
+    # lado quando é largo. Daí o 8 x 11.
     _p("Pagamentos por tipo",
        'SELECT tipo_pagamento AS "Tipo", sum(valor_pagamento) AS "Valor" '
        "FROM painel_pagamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "pie", _pos(PAGAMENTOS, 4, 16, 8, 8), (periodo(PAGAMENTOS_V),),
+       "pie", _pos(PAGAMENTOS, 4, 16, 8, 11), (periodo(PAGAMENTOS_V),),
        {"pie.dimension": "Tipo", "pie.metric": "Valor", **moeda("Valor")}),
     _p("Desconto por tipo",
        'SELECT tipo AS "Tipo", valor AS "Valor" FROM ('
@@ -345,25 +431,23 @@ PERGUNTAS: tuple[Pergunta, ...] = (
        "UNION ALL SELECT 2, 'Combos', coalesce(sum(valor_combos), 0) FROM painel_vendas WHERE {{data}} "
        "UNION ALL SELECT 3, 'Cortesias', coalesce(sum(valor_cortesias), 0) FROM painel_vendas WHERE {{data}}"
        ") AS tipos ORDER BY ordem",
-       "bar", _pos(PAGAMENTOS, 12, 0, 12, 7), (periodo(VENDAS),),
+       "bar", _pos(PAGAMENTOS, 15, 0, 12, 7), (periodo(VENDAS),),
        {**eixos("Tipo", "Valor"), "graph.show_values": True, **moeda("Valor")}),
     _p("Acréscimos por tipo",
        'SELECT tipo_taxa AS "Tipo", sum(valor_taxa) AS "Valor" '
        "FROM painel_acrescimos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
-       "bar", _pos(PAGAMENTOS, 12, 12, 12, 7), (periodo(ACRESCIMOS_V),),
+       "bar", _pos(PAGAMENTOS, 15, 12, 12, 7), (periodo(ACRESCIMOS_V),),
        {**eixos("Tipo", "Valor"), **moeda("Valor")}),
     _p("Descontos por motivo",
        'SELECT desconto AS "Desconto", motivo AS "Motivo", '
        'count(*) AS "Quantidade", sum(valor_desconto) AS "Valor" '
        "FROM painel_descontos WHERE {{data}} GROUP BY 1, 2 ORDER BY 4 DESC",
-       "table", _pos(PAGAMENTOS, 19, 0, 24, 7), (periodo(DESCONTOS_V),), moeda("Valor")),
+       "table", _pos(PAGAMENTOS, 22, 0, 24, 7), (periodo(DESCONTOS_V),), moeda("Valor")),
     # -- Cancelamentos ------------------------------------------------------------
-    _p("Valor cancelado",
-       'SELECT coalesce(sum(valor_produto), 0) AS "Valor cancelado" FROM painel_cancelamentos WHERE {{data}}',
-       "scalar", _pos(CANCELAMENTOS, 0, 0, 12, 3), (periodo(CANCELAMENTOS_V),), moeda("Valor cancelado")),
-    _p("Itens cancelados",
-       'SELECT coalesce(sum(qtd_produtos), 0) AS "Itens cancelados" FROM painel_cancelamentos WHERE {{data}}',
-       "scalar", _pos(CANCELAMENTOS, 0, 12, 12, 3), (periodo(CANCELAMENTOS_V),)),
+    numero_detalhado("Valor cancelado", "sum(valor_produto)", "Total cancelado no período",
+                     DETALHE_CANCELAMENTO, _pos(CANCELAMENTOS, 0, 0, 12, 3), em_reais=True),
+    numero_detalhado("Itens cancelados", "sum(qtd_produtos)", "Total de itens cancelados no período",
+                     DETALHE_CANCELAMENTO, _pos(CANCELAMENTOS, 0, 12, 12, 3)),
     _p("Cancelamentos por hora",
        f'SELECT horas.hora AS "Hora", sum(valor_produto) AS "Valor cancelado" FROM {HORAS} '
        "LEFT JOIN painel_cancelamentos ON painel_cancelamentos.hora = horas.hora AND {{data}} "
@@ -389,6 +473,13 @@ PERGUNTAS: tuple[Pergunta, ...] = (
        'operador_cancelamento AS "Cancelado por", tipo_cancelamento AS "Tipo" '
        "FROM painel_cancelamentos WHERE {{data}} ORDER BY 1 DESC LIMIT 100",
        "table", _pos(CANCELAMENTOS, 18, 0, 24, 7), (periodo(CANCELAMENTOS_V),), moeda("Valor")),
+    # -- Detalhes: linha a linha, para baixar em Excel (a tela mostra até 2.000) --
+    tabela_detalhada("Vendas detalhadas", DETALHE_VENDA, _pos(DETALHES, 0, 0, 24, 8)),
+    tabela_detalhada("Itens vendidos", DETALHE_ITEM, _pos(DETALHES, 8, 0, 24, 8)),
+    tabela_detalhada("Pagamentos detalhados", DETALHE_PAGAMENTO, _pos(DETALHES, 16, 0, 24, 8)),
+    tabela_detalhada("Descontos detalhados", DETALHE_DESCONTO, _pos(DETALHES, 24, 0, 24, 8)),
+    tabela_detalhada("Acréscimos detalhados", DETALHE_ACRESCIMO, _pos(DETALHES, 32, 0, 24, 8)),
+    tabela_detalhada("Cancelamentos detalhados", DETALHE_CANCELAMENTO, _pos(DETALHES, 40, 0, 24, 8)),
 )
 
 
