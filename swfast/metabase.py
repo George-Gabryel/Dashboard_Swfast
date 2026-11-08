@@ -94,6 +94,11 @@ def moeda(*colunas: str) -> dict[str, Any]:
     }
 
 
+# Porcentagem das pizzas (legenda e fatias) com 1 casa: sem isso o Metabase
+# usa quantas casas forem precisas para diferenciar fatias pequenas (40,5786%).
+PIZZA = {"pie.decimal_places": 1}
+
+
 def eixos(dimensao: str, *metricas: str, **extra: Any) -> dict[str, Any]:
     # Sem o agrupamento automático em "Outros" (barras e pizza). No gráfico
     # de linhas horizontais ("row") quem decide é a altura do card.
@@ -255,6 +260,7 @@ def pizza_top5(nome: str, coluna: str, rotulo: str, posicao: Posicao) -> Pergunt
         # Sem agrupar fatias pequenas: OUTROS já vem do SQL. O Metabase ordena
         # as fatias por tamanho, então OUTROS fica onde o seu valor o põe.
         "pie.slice_threshold": 0,
+        **PIZZA,
     }
     return _p(nome, consulta, "pie", posicao, (periodo(PRODUTOS_V), METRICA), ajustes)
 HORAS = "generate_series(0, 23) AS horas(hora)"
@@ -424,7 +430,7 @@ PERGUNTAS: tuple[Pergunta, ...] = (
        'SELECT tipo_pagamento AS "Tipo", sum(valor_pagamento) AS "Valor" '
        "FROM painel_pagamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
        "pie", _pos(PAGAMENTOS, 4, 16, 8, 11), (periodo(PAGAMENTOS_V),),
-       {"pie.dimension": "Tipo", "pie.metric": "Valor", **moeda("Valor")}),
+       {"pie.dimension": "Tipo", "pie.metric": "Valor", **PIZZA, **moeda("Valor")}),
     _p("Desconto por tipo",
        'SELECT tipo AS "Tipo", valor AS "Valor" FROM ('
        "SELECT 1 AS ordem, 'Convênios' AS tipo, coalesce(sum(valor_descontos), 0) AS valor FROM painel_vendas WHERE {{data}} "
@@ -466,7 +472,7 @@ PERGUNTAS: tuple[Pergunta, ...] = (
        'SELECT operador_cancelamento AS "Operador", sum(valor_produto) AS "Valor" '
        "FROM painel_cancelamentos WHERE {{data}} GROUP BY 1 ORDER BY 2 DESC",
        "pie", _pos(CANCELAMENTOS, 10, 12, 12, 8), (periodo(CANCELAMENTOS_V),),
-       {"pie.dimension": "Operador", "pie.metric": "Valor", **moeda("Valor")}),
+       {"pie.dimension": "Operador", "pie.metric": "Valor", **PIZZA, **moeda("Valor")}),
     _p("Últimos cancelamentos",
        'SELECT data_hora_cancelamento AS "Quando", produto AS "Produto", qtd_produtos AS "Qtd", '
        'valor_produto AS "Valor", motivo_cancelamento AS "Motivo", '

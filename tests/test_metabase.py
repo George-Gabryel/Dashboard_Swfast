@@ -275,6 +275,13 @@ def test_pagamentos_por_tipo_tem_a_legenda_abaixo_da_rosca():
     assert pos.largura <= pos.altura * 3 / 4 and pos.altura > 3 and pos.largura > 2
 
 
+def test_pizzas_mostram_porcentagem_com_uma_casa_decimal():
+    pizzas = [p for p in PERGUNTAS if p.display == "pie"]
+    assert len(pizzas) == 4
+    for pergunta in pizzas:
+        assert pergunta.ajustes["pie.decimal_places"] == 1, pergunta.nome
+
+
 def test_pizzas_no_estilo_top5_com_outros_e_total():
     for nome in ("Top 5 grupos", "Top 5 subgrupos"):
         pergunta = next(p for p in PERGUNTAS if p.nome == nome)
