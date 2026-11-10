@@ -162,7 +162,7 @@ Pode ser executado várias vezes: atualiza as perguntas no lugar, sem duplicar n
 
 O atalho "Dashboard Swfast" na área de trabalho roda esse script escondido. O script:
 1. verifica se o Metabase responde;
-2. se não responder, liga os containers `swfast-postgres` e `swfast-metabase` (com Docker Desktop ou com Docker dentro do WSL) e espera até 3 min;
+2. se não responder, liga os containers `swfast-postgres` e `swfast-metabase` pelo Docker dentro do WSL (`wsl.exe -d Ubuntu`) e espera até 3 min;
 3. abre o link público no Edge em modo aplicativo (janela própria, sem barra de endereço), com atualização a cada 10 min.
 
 Se o dashboard já estiver aberto, o script só traz a janela para a frente. O log fica em `%USERPROFILE%\SwfastDashboard\abrir_dashboard.log`.
@@ -171,55 +171,73 @@ Se o dashboard já estiver aberto, o script só traz a janela para a frente. O l
 
 ## Instalação numa máquina Windows nova
 
-Há duas formas de rodar o Docker no Windows. Escolha uma:
+O Docker roda **dentro do Ubuntu do WSL2** (Docker Engine), e não no Docker Desktop. Assim os containers sobem no boot da máquina, mesmo sem ninguém fazer login no Windows.
 
-| Opção                                   | Quando usar                                       | Liga sozinho no boot?                                |
-|-----------------------------------------|---------------------------------------------------|------------------------------------------------------|
-| **A. Docker Desktop**                   | Instalação mais simples                           | Só depois que alguém faz login no Windows            |
-| **B. WSL2 + Docker Engine (Ubuntu)**    | Produção, máquina que fica ligada sem login       | Sim, com a tarefa agendada descrita mais abaixo      |
+Por isso, **todos os comandos `docker` rodam no terminal do Ubuntu**. No PowerShell o Windows não encontra o `docker` e mostra o erro `O termo 'docker' não é reconhecido...`. O PowerShell só é usado no passo 1 (instalar o WSL) e no passo 7 (criar o atalho).
 
-Os comandos `docker compose` são os mesmos nas duas. Na opção A eles rodam no PowerShell; na opção B, no terminal do Ubuntu.
+> Faça a instalação inteira logado no Windows com o **mesmo usuário que o cliente vai usar**. O WSL e o Ubuntu são instalados por usuário do Windows, e o atalho precisa enxergar o Ubuntu desse usuário.
 
 ### 1. Pré-requisitos
 
 1. **Windows 10 22H2 ou Windows 11**, com virtualização habilitada na BIOS.
-2. **WSL2**. Num PowerShell **como administrador**:
+2. **WSL2 com Ubuntu**. Num PowerShell **como administrador**:
    ```powershell
-   wsl --install
+   wsl --install -d Ubuntu
    ```
-   Reinicie quando o comando pedir.
-3. **Docker**, conforme a opção escolhida:
-   - **A. Docker Desktop**: baixe em <https://www.docker.com/products/docker-desktop/>, instale com o backend WSL2 e abra uma vez para concluir a configuração.
-   - **B. Docker Engine no Ubuntu do WSL**: no terminal do Ubuntu, siga <https://docs.docker.com/engine/install/ubuntu/> e depois rode `sudo usermod -aG docker $USER`. Feche e abra o terminal.
-4. **Git**: <https://git-scm.com/download/win> (ou `sudo apt install git` no Ubuntu, na opção B).
+   Reinicie quando o comando pedir. Na primeira abertura do **Ubuntu** (menu Iniciar), crie o usuário e a senha do Linux.
+3. **Docker Engine no Ubuntu**. No terminal do Ubuntu, siga <https://docs.docker.com/engine/install/ubuntu/> (seção *Install using the apt repository*). Depois libere o Docker para o seu usuário:
+   ```bash
+   sudo usermod -aG docker $USER
+   ```
+   Feche o terminal do Ubuntu e abra de novo para a permissão valer.
+4. **Git e dos2unix** no Ubuntu:
+   ```bash
+   sudo apt install -y git dos2unix
+   ```
 5. **Microsoft Edge**: já vem no Windows e é usado pelo atalho.
 6. **Chave da API Swfast v5** do cliente.
 
-Para conferir:
-```powershell
+Para conferir, no terminal do Ubuntu:
+```bash
 docker --version
 docker compose version
+docker ps
 ```
 
-### 2. Copiar os arquivos
+Se o `docker ps` falhar:
 
-Tudo está neste repositório, inclusive o compose do banco (`docker_postgre/`):
+| Mensagem                                     | O que fazer                                                                                  |
+|----------------------------------------------|----------------------------------------------------------------------------------------------|
+| `permission denied ... /var/run/docker.sock` | Faltou o `usermod` do item 3, ou o terminal não foi reaberto depois dele.                    |
+| `Cannot connect to the Docker daemon`        | O serviço está parado. Rode `sudo service docker start`. O passo 8 faz ele subir sozinho.   |
 
-```powershell
-mkdir C:\swfast; cd C:\swfast
+### 2. Colocar o projeto dentro do Linux
+
+O projeto fica **dentro do Linux**, em `~/swfast/Dashboard_Swfast`, e não em `/mnt/c/...`. Fica mais rápido e evita problemas de permissão nas pastas montadas do Windows.
+
+```bash
+mkdir -p ~/swfast && cd ~/swfast
 git clone <url-do-repositorio> Dashboard_Swfast
+cd Dashboard_Swfast
 ```
 
-Os arquivos `.env`, `.env.meta`, `docker_postgre\.env.postgre` e a pasta `data\` **não estão no git**. São criados nos passos seguintes.
+> **Se o projeto já estiver numa pasta do Windows** (ex.: `C:\Swfast\Dashboard_Swfast`), copie para o Linux em vez de clonar. Os `.env` que já existirem vêm junto. Converta-os depois, porque arquivos editados no Windows têm quebra de linha CRLF e o `\r` pode ir parar no fim das senhas:
+> ```bash
+> mkdir -p ~/swfast && cp -r /mnt/c/Swfast/Dashboard_Swfast ~/swfast/
+> cd ~/swfast/Dashboard_Swfast
+> dos2unix .env* docker_postgre/.env* 2>/dev/null
+> ```
 
-> **Opção B:** clone **dentro do Linux** (ex.: `~/swfast`), e não em `/mnt/c/...`. Fica mais rápido e evita problemas de permissão nas pastas montadas.
+Os arquivos `.env`, `.env.meta`, `docker_postgre/.env.postgre` e a pasta `data/` **não estão no git**. São criados nos passos seguintes.
+
+Para editar os arquivos, os passos usam o `nano`: salve com `Ctrl+O` e `Enter` e saia com `Ctrl+X`.
 
 ### 3. Subir o banco
 
-```powershell
-cd C:\swfast\Dashboard_Swfast\docker_postgre
-copy .env.postgre.example .env.postgre
-notepad .env.postgre
+```bash
+cd ~/swfast/Dashboard_Swfast/docker_postgre
+cp .env.postgre.example .env.postgre
+nano .env.postgre
 ```
 
 Preencha o `.env.postgre`. **Não deixe espaços em volta do `=`**:
@@ -230,7 +248,7 @@ POSTGRES_USER=swfast
 POSTGRES_PASSWORD=<uma senha forte>
 ```
 
-```powershell
+```bash
 docker compose up -d
 docker ps      # swfast-postgres deve aparecer como "healthy"
 ```
@@ -245,20 +263,20 @@ O arquivo se chama `.env.postgre`, e não `.env`, para não ser confundido com o
 
 ### 4. Configurar e subir o ETL
 
-```powershell
-cd C:\swfast\Dashboard_Swfast
-copy .env.example .env
-notepad .env
+```bash
+cd ~/swfast/Dashboard_Swfast
+cp .env.example .env
+nano .env
 ```
 
 Itens obrigatórios:
 - `SWFAST_API_KEY`: a chave do cliente.
-- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: **idênticos** aos do `docker_postgre\.env.postgre`.
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`: **idênticos** aos do `docker_postgre/.env.postgre`.
 - `POSTGRES_HOST=127.0.0.1` e `POSTGRES_PORT=5432` podem ficar assim. Dentro do container, o compose troca esses valores por `postgres:5432`.
 
 Se a conta for de **loja central** e for preciso filtrar lojas, preencha `LISTA_DE_LOJAS` com os códigos separados por vírgula.
 
-```powershell
+```bash
 docker compose up -d --build
 docker logs -f swfast-etl
 ```
@@ -269,15 +287,16 @@ O primeiro ciclo roda logo ao subir. Ele cria as tabelas e views e coleta os úl
 
 Para trazer meses anteriores, rode uma vez dentro do container que já está de pé. O intervalo é quebrado sozinho em janelas de 7 dias:
 
-```powershell
+```bash
 docker exec swfast-etl python main.py --historico 2026-01-01 2026-10-29
 ```
 
 ### 6. Configurar e subir o Metabase
 
-```powershell
-copy .env.meta.example .env.meta
-notepad .env.meta
+```bash
+cd ~/swfast/Dashboard_Swfast
+cp .env.meta.example .env.meta
+nano .env.meta
 ```
 
 Preencha com senhas novas:
@@ -285,7 +304,7 @@ Preencha com senhas novas:
 - `MB_DB_PASS`: senha do dono do banco interno `metabase`.
 - `METABASE_LEITOR_SENHA`: senha do usuário somente leitura que o Metabase usa para consultar os dados.
 
-```powershell
+```bash
 docker compose -f metabase/docker-compose.yml up -d
 docker compose run --rm instalar-dashboard
 ```
@@ -296,71 +315,81 @@ Enquanto o banco `metabase` não existe, o container do Metabase reinicia sozinh
 Dashboard pronto: http://127.0.0.1:3000/public/dashboard/<uuid>
 ```
 
-e o link fica gravado em `data\dashboard_url.txt`.
+e o link fica gravado em `data/dashboard_url.txt`.
 
 ### 7. Criar o atalho na área de trabalho do cliente
 
-No **Windows**, logado com o **usuário do cliente**, num PowerShell comum (não precisa ser administrador):
+Este passo é no **Windows**. Descubra antes o seu usuário do Linux, rodando `whoami` no Ubuntu.
+
+Logado com o **usuário do cliente**, abra um PowerShell comum (não precisa ser administrador) e rode, trocando `<usuario>` pelo resultado do `whoami`:
 
 ```powershell
-cd C:\swfast\Dashboard_Swfast
-powershell -ExecutionPolicy Bypass -File metabase\abrir_dashboard.ps1 -Instalar
+powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu\home\<usuario>\swfast\Dashboard_Swfast\metabase\abrir_dashboard.ps1 -Instalar `
+  -ArquivoUrl \\wsl$\Ubuntu\home\<usuario>\swfast\Dashboard_Swfast\data\dashboard_url.txt
 ```
-
-> **Opção B:** o script e o link estão dentro do Linux. Aponte para eles pelo caminho de rede do WSL:
-> ```powershell
-> powershell -ExecutionPolicy Bypass -File \\wsl$\Ubuntu\home\<usuario>\swfast\Dashboard_Swfast\metabase\abrir_dashboard.ps1 -Instalar `
->   -ArquivoUrl \\wsl$\Ubuntu\home\<usuario>\swfast\Dashboard_Swfast\data\dashboard_url.txt
-> ```
 
 O comando copia o script e o link para `%USERPROFILE%\SwfastDashboard` e cria o atalho **"Dashboard Swfast"** na área de trabalho. Dê dois cliques para testar.
 
+### 8. Ligar sozinho quando a máquina inicia
+
+Siga a seção [Ligar sozinho quando a máquina inicia](#ligar-sozinho-quando-a-máquina-inicia), logo abaixo.
+
 ### Checklist final
 
-- [ ] `docker ps` mostra `swfast-postgres`, `swfast-etl` e `swfast-metabase` rodando.
-- [ ] `data\_manifesto\` tem um `execucao_*.json` com `"sucesso": true`.
-- [ ] `http://127.0.0.1:3000` abre o Metabase e o login de administrador funciona.
+- [ ] `docker ps` (no Ubuntu) mostra `swfast-postgres`, `swfast-etl` e `swfast-metabase` rodando.
+- [ ] `~/swfast/Dashboard_Swfast/data/_manifesto/` tem um `execucao_*.json` com `"sucesso": true`.
+- [ ] `http://127.0.0.1:3000` abre o Metabase no navegador do Windows e o login de administrador funciona.
 - [ ] O atalho abre o dashboard com dados.
-- [ ] Depois de reiniciar a máquina, tudo volta sozinho (próxima seção).
+- [ ] Depois de reiniciar a máquina, tudo volta sozinho, sem precisar abrir o Ubuntu.
 
 ---
 
 ## Ligar sozinho quando a máquina inicia
 
-Os três containers usam `restart: unless-stopped`, ou seja, voltam sozinhos **sempre que o Docker sobe**. O que falta é fazer o Docker subir.
+Os três containers usam `restart: unless-stopped`, ou seja, voltam sozinhos **sempre que o Docker sobe**. O que falta é fazer o WSL e o Docker subirem no boot, sem login.
 
-**Opção A (Docker Desktop)**
-- Em *Settings → General*, marque **"Start Docker Desktop when you sign in to your computer"**.
-- Limitação: o Docker só sobe depois do login no Windows. Se o cliente abrir o atalho antes de o Docker estar pronto, o script espera até 3 min.
-
-**Opção B (WSL2 + Docker Engine): sobe no boot, sem login**
-1. No Ubuntu, edite `/etc/wsl.conf` (`sudo nano /etc/wsl.conf`):
+1. **Docker subindo junto com o Ubuntu.** No Ubuntu, abra o `/etc/wsl.conf`:
+   ```bash
+   sudo nano /etc/wsl.conf
+   ```
+   e garanta que ele tenha:
    ```ini
    [boot]
    systemd=true
    ```
-   Depois rode `sudo systemctl enable docker` e, no PowerShell, `wsl --shutdown`.
-2. No Windows, abra o **Agendador de Tarefas → Criar Tarefa**:
-   - **Geral**: marque "Executar estando o usuário conectado ou não".
+   Depois habilite o serviço:
+   ```bash
+   sudo systemctl enable docker
+   ```
+   No PowerShell do Windows, reinicie o WSL para aplicar:
+   ```powershell
+   wsl --shutdown
+   ```
+2. **WSL subindo no boot do Windows.** Abra o **Agendador de Tarefas → Criar Tarefa**:
+   - **Geral**: use o mesmo usuário do Windows que instalou o Ubuntu e marque "Executar estando o usuário conectado ou não".
    - **Disparadores**: "Ao iniciar o sistema".
    - **Ações**: programa `wsl.exe`, argumentos `-d Ubuntu --exec sleep infinity`.
 
-   A tarefa liga o WSL no boot e o mantém de pé. Sem ela, o WSL só sobe no login.
+   A tarefa liga o WSL no boot e o mantém de pé. Sem ela, o WSL só sobe quando alguém abre o Ubuntu ou o atalho.
+
+Se o cliente abrir o atalho antes de o Docker estar pronto, o script liga os containers pelo `wsl.exe` e espera até 3 min.
 
 ---
 
 ## Operação do dia a dia
 
-| Tarefa                         | Comando (na pasta `Dashboard_Swfast`)                                    |
+Todos os comandos rodam no **terminal do Ubuntu**, na pasta `~/swfast/Dashboard_Swfast`.
+
+| Tarefa                         | Comando                                                                  |
 |--------------------------------|--------------------------------------------------------------------------|
 | Acompanhar o ETL               | `docker logs -f swfast-etl`                                              |
-| Ver o último ciclo             | abrir o `execucao_*.json` mais recente em `data\_manifesto\`             |
+| Ver o último ciclo             | `ls -t data/_manifesto/ \| head -1` e abrir o arquivo com `less`          |
 | Forçar uma coleta agora        | `docker exec swfast-etl python main.py`                                  |
 | Coletar um período específico  | `docker exec swfast-etl python main.py --inicio 2026-10-01 --fim 2026-10-07` |
 | Coletar só uma fonte           | `docker exec swfast-etl python main.py --fontes vendas`                  |
 | Atualizar o código             | `git pull` e depois `docker compose up -d --build`                       |
 | Atualizar o dashboard          | `docker compose run --rm instalar-dashboard` (depois de mudar `visoes.py` ou `metabase.py`) |
-| Editar o dashboard à mão       | `http://127.0.0.1:3000` com o login de `.env.meta`                       |
+| Editar o dashboard à mão       | `http://127.0.0.1:3000` no navegador do Windows, com o login de `.env.meta` |
 | Parar o ETL                    | `docker compose stop` (o dashboard continua funcionando)                 |
 
 ### Exportar para Excel
@@ -400,9 +429,9 @@ O modo `--continuo` roda um ciclo ao iniciar e depois em horários fixos a cada 
 
 ### Backup do banco
 
-A pasta `docker_postgre\backups` está montada em `/backups` dentro do container:
+A pasta `docker_postgre/backups` está montada em `/backups` dentro do container. No terminal do Ubuntu:
 
-```powershell
+```bash
 docker exec swfast-postgres pg_dump -U swfast -d swfast   -Fc -f /backups/swfast.dump
 docker exec swfast-postgres pg_dump -U swfast -d metabase -Fc -f /backups/metabase.dump
 ```
@@ -498,14 +527,18 @@ As três só valem na primeira subida, quando o volume ainda está vazio.
 | Sintoma                                                                 | Causa provável / solução                                                                                       |
 |-------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
 | `network dashboard-swfast_default declared as external, but could not be found` | O banco não foi iniciado. Rode `docker compose up -d` em `docker_postgre` primeiro.                     |
-| `env file ...\.env.postgre not found`                                   | Falta criar o `docker_postgre\.env.postgre` a partir do `.env.postgre.example` (passo 3).                      |
+| PowerShell: `O termo 'docker' não é reconhecido...`                     | O Docker está dentro do Ubuntu. Rode os comandos `docker` no terminal do Ubuntu (veja o início da instalação). |
+| `permission denied ... /var/run/docker.sock`                            | Rode `sudo usermod -aG docker $USER` e feche e abra o terminal do Ubuntu.                                      |
+| `Cannot connect to the Docker daemon`                                   | Serviço parado: `sudo service docker start`. Para subir sozinho, veja "Ligar sozinho quando a máquina inicia". |
+| `env file .../.env.postgre not found`                                   | Falta criar o `docker_postgre/.env.postgre` a partir do `.env.postgre.example` (passo 3).                      |
+| `usuário ou senha recusados` com a senha certa no `.env`                | O `.env` veio do Windows com quebra de linha CRLF. Rode `dos2unix .env* docker_postgre/.env*` (passo 2).       |
 | Log: `usuário ou senha recusados`                                       | O `.env` do ETL não bate com o do banco, ou a senha foi trocada depois de criar o volume (ver passo 3).        |
 | Log: `Postgres ... inacessível`                                         | O container `swfast-postgres` está parado: `docker start swfast-postgres`.                                     |
 | Log: `401`/`403 ... Confira a API-Key`                                  | Chave errada, expirada ou sem acesso ao endpoint.                                                              |
 | Log: `campos novos no JSON` ou `campos da planilha ausentes`            | A API mudou o formato. Atualize `swfast/esquemas.py`. O ciclo sai com código 1 (alerta).                       |
 | `swfast-metabase` reiniciando sem parar                                 | Normal antes do `instalar-dashboard`, que cria o banco `metabase`. Rode o passo 6.                             |
-| Atalho diz "O dashboard ainda não foi instalado"                        | Falta o `-Instalar` do passo 7, ou `data\dashboard_url.txt` não existe.                                        |
-| Atalho diz "O dashboard não respondeu"                                  | O Docker não subiu. Abra o Docker Desktop (A) ou confira a tarefa agendada (B). Veja `%USERPROFILE%\SwfastDashboard\abrir_dashboard.log`. |
+| Atalho diz "O dashboard ainda não foi instalado"                        | Falta o `-Instalar` do passo 7, ou `data/dashboard_url.txt` não existe.                                        |
+| Atalho diz "O dashboard não respondeu"                                  | O Docker não subiu. Confira a tarefa agendada e o `systemctl enable docker` ("Ligar sozinho quando a máquina inicia"). Veja `%USERPROFILE%\SwfastDashboard\abrir_dashboard.log`. |
 | Horários do agendamento errados                                         | Fuso: todos os containers usam `TZ=America/Recife`. Se o cliente estiver em outro fuso, ajuste nos três composes. |
 
 ### Observações
