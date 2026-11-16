@@ -173,7 +173,7 @@ Se o dashboard já estiver aberto, o script só traz a janela para a frente. O l
 
 O Docker roda **dentro do Ubuntu do WSL2** (Docker Engine), e não no Docker Desktop. Assim os containers sobem no boot da máquina, mesmo sem ninguém fazer login no Windows.
 
-Por isso, **todos os comandos `docker` rodam no terminal do Ubuntu**. No PowerShell o Windows não encontra o `docker` e mostra o erro `O termo 'docker' não é reconhecido...`. O PowerShell só é usado no passo 1 (instalar o WSL) e no passo 7 (criar o atalho).
+Por isso, **todos os comandos `docker` rodam no terminal do Ubuntu**. No PowerShell o Windows não encontra o `docker` e mostra o erro `O termo 'docker' não é reconhecido...`. O PowerShell só é usado no passo 1 (instalar o WSL), no passo 7 (criar o atalho) e no passo 8 (criar o serviço que liga o WSL no boot).
 
 > Faça a instalação inteira logado no Windows com o **mesmo usuário que o cliente vai usar**. O WSL e o Ubuntu são instalados por usuário do Windows, e o atalho precisa enxergar o Ubuntu desse usuário.
 
@@ -365,14 +365,58 @@ Os três containers usam `restart: unless-stopped`, ou seja, voltam sozinhos **s
    ```powershell
    wsl --shutdown
    ```
-2. **WSL subindo no boot do Windows.** Abra o **Agendador de Tarefas → Criar Tarefa**:
-   - **Geral**: use o mesmo usuário do Windows que instalou o Ubuntu e marque "Executar estando o usuário conectado ou não".
-   - **Disparadores**: "Ao iniciar o sistema".
-   - **Ações**: programa `wsl.exe`, argumentos `-d Ubuntu --exec sleep infinity`.
+2. **WSL subindo no boot do Windows.** Um serviço do Windows, o `SwfastWSL`, roda `wsl.exe -d Ubuntu --exec sleep infinity`. Ele liga o WSL no boot, mesmo sem login, e o mantém de pé. Sem ele, o WSL só sobe quando alguém abre o Ubuntu ou o atalho. O serviço é criado com o **NSSM**, que transforma qualquer programa em serviço e o reinicia sozinho se ele cair.
 
-   A tarefa liga o WSL no boot e o mantém de pé. Sem ela, o WSL só sobe quando alguém abre o Ubuntu ou o atalho.
+   Todos os comandos abaixo rodam num **PowerShell como administrador**: menu Iniciar → digite `PowerShell` → botão direito → **Executar como administrador**. Num terminal comum, o `nssm` responde `OpenService(): Acesso negado`.
+
+   1. **Instale o NSSM:**
+      ```powershell
+      winget install NSSM.NSSM
+      ```
+      Feche e abra de novo o PowerShell como administrador para o `nssm` ser encontrado. Sem `winget`, baixe o zip em <https://nssm.cc/download> (prefira a versão **2.24-101**) e copie o `win64\nssm.exe` para `C:\Windows\System32`.
+
+   2. **Crie e configure o serviço:**
+      ```powershell
+      nssm install SwfastWSL "C:\Windows\System32\wsl.exe" "-d Ubuntu --exec sleep infinity"
+      nssm set SwfastWSL DisplayName "Swfast - WSL/Docker"
+      nssm set SwfastWSL Description "Mantem o Ubuntu do WSL ligado para os containers do dashboard Swfast."
+      nssm set SwfastWSL Start SERVICE_DELAYED_AUTO_START
+      nssm set SwfastWSL AppExit Default Restart
+      nssm set SwfastWSL AppRestartDelay 15000
+      ```
+      O início automático atrasado espera o boot assentar, incluindo o próprio serviço do WSL. Se o `wsl.exe` cair, o NSSM o sobe de novo depois de 15 s.
+
+   3. **Defina a conta do serviço.** Este passo é obrigatório, **mesmo que o computador tenha um só usuário**. Por padrão o serviço roda como *LocalSystem*, uma conta interna do Windows que não enxerga o Ubuntu: cada distro do WSL pertence ao usuário que a instalou. Abra a tela de edição:
+      ```powershell
+      nssm edit SwfastWSL
+      ```
+      Na aba **Log on**, marque **This account** e informe `.\<usuário do Windows>` (o mesmo que instalou o Ubuntu) e a senha do Windows desse usuário. Depois clique em **Edit service**. Se o usuário entra com **conta Microsoft** ou **PIN**, a senha é a da conta Microsoft, não o PIN.
+
+      > ⚠️ Se a senha desse usuário mudar, o serviço deixa de subir. Repita este passo com a senha nova.
+
+   4. **Inicie e confira:**
+      ```powershell
+      nssm start SwfastWSL
+      nssm status SwfastWSL
+      ```
+      O status deve ser `SERVICE_RUNNING`. Se o serviço não iniciar, veja a [Solução de problemas](#solução-de-problemas).
+
+   5. **Se a máquina usava a tarefa agendada antiga** (`wsl.exe -d Ubuntu --exec sleep infinity` no Agendador de Tarefas), apague essa tarefa. O serviço faz o mesmo papel.
+
+3. **Teste com um reboot sem login.** Reinicie a máquina e **não faça login** por 3 a 5 minutos. Depois de entrar, no PowerShell:
+   ```powershell
+   wsl -d Ubuntu -- uptime -s
+   wsl -d Ubuntu -- docker ps
+   ```
+   O `uptime -s` deve mostrar um horário próximo do boot, e não do login. Os containers devem estar "Up" há mais tempo do que a sessão. Isso prova que subiram sozinhos.
 
 Se o cliente abrir o atalho antes de o Docker estar pronto, o script liga os containers pelo `wsl.exe` e espera até 3 min.
+
+Para remover o serviço, num PowerShell como administrador:
+```powershell
+nssm stop SwfastWSL
+nssm remove SwfastWSL confirm
+```
 
 ---
 
@@ -538,7 +582,10 @@ As três só valem na primeira subida, quando o volume ainda está vazio.
 | Log: `campos novos no JSON` ou `campos da planilha ausentes`            | A API mudou o formato. Atualize `swfast/esquemas.py`. O ciclo sai com código 1 (alerta).                       |
 | `swfast-metabase` reiniciando sem parar                                 | Normal antes do `instalar-dashboard`, que cria o banco `metabase`. Rode o passo 6.                             |
 | Atalho diz "O dashboard ainda não foi instalado"                        | Falta o `-Instalar` do passo 7, ou `data/dashboard_url.txt` não existe.                                        |
-| Atalho diz "O dashboard não respondeu"                                  | O Docker não subiu. Confira a tarefa agendada e o `systemctl enable docker` ("Ligar sozinho quando a máquina inicia"). Veja `%USERPROFILE%\SwfastDashboard\abrir_dashboard.log`. |
+| Atalho diz "O dashboard não respondeu"                                  | O Docker não subiu. Confira o serviço (`nssm status SwfastWSL`) e o `systemctl enable docker` ("Ligar sozinho quando a máquina inicia"). Veja `%USERPROFILE%\SwfastDashboard\abrir_dashboard.log`. |
+| `nssm`: `OpenService(): Acesso negado`                                  | O PowerShell não está como administrador. Abra com botão direito → **Executar como administrador**.            |
+| `nssm start`: erro 1069 (falha de logon)                                | Senha errada na aba **Log on**, ou falta o direito "Fazer logon como serviço". Corrija com `nssm edit SwfastWSL`. Se persistir: `secpol.msc` → Políticas Locais → Atribuição de Direitos de Usuário → **Fazer logon como serviço** → adicione o usuário. |
+| `nssm status SwfastWSL` mostra `SERVICE_PAUSED` ou fica alternando      | O `wsl.exe` morre ao iniciar. Quase sempre o serviço está como *LocalSystem*, que não enxerga o Ubuntu: defina a conta do usuário em `nssm edit SwfastWSL` → **Log on** e rode `nssm restart SwfastWSL`. |
 | Horários do agendamento errados                                         | Fuso: todos os containers usam `TZ=America/Recife`. Se o cliente estiver em outro fuso, ajuste nos três composes. |
 
 ### Observações

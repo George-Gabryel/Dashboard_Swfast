@@ -18,11 +18,11 @@
 #          [boot]
 #          systemd=true
 #      depois:  sudo systemctl enable docker
-#   2. No Windows, Agendador de Tarefas -> Criar Tarefa:
-#        Gatilho: "Ao iniciar o sistema"
-#        Marcar:  "Executar estando o usuário conectado ou não"
-#        Ação:    wsl.exe  -d Ubuntu --exec sleep infinity
-#      (liga o WSL no boot e o mantém de pé; sem isso ele só sobe no login)
+#   2. No Windows, serviço "SwfastWSL" criado com o NSSM, rodando
+#        wsl.exe -d Ubuntu --exec sleep infinity
+#      com a conta do usuário que instalou o Ubuntu (não LocalSystem).
+#      Liga o WSL no boot e o mantém de pé; sem isso ele só sobe no login.
+#      Passo a passo no README, seção "Ligar sozinho quando a máquina inicia".
 #   3. Deixe este repositório (com docker_postgre/, os .env e data/) dentro
 #      do Linux (ex.: ~/swfast), não em /mnt/c — mais rápido e sem problema
 #      de permissão nas pastas montadas.
